@@ -5,6 +5,28 @@ scrolling, and a syntax highlighter whose rules and colours are **fully
 external**: the C code contains no keyword lists, no extension tables, and no
 hardcoded colours — everything comes from config files.
 
+## Quick Install (Linux)
+
+Install the latest prebuilt binary in one line. It downloads
+`pvim-linux-x86_64` from the GitHub Releases page, makes it executable, and
+installs it to `/usr/local/bin/pvim` (using `sudo` only when that directory is
+not writable):
+
+```sh
+curl -sSL https://raw.githubusercontent.com/Pekos123/pvim/main/install.sh | bash
+```
+
+Prefer not to pipe a script into your shell? Fetch the binary yourself and put
+it on your `PATH`:
+
+```sh
+curl -sL https://github.com/Pekos123/pvim/releases/latest/download/pvim-linux-x86_64 -o pvim && chmod +x pvim && sudo mv pvim /usr/local/bin/
+```
+
+Either way `pvim` is then available from any directory. The release binary is a
+standalone 64-bit x86_64 Linux executable with no runtime dependencies; to
+build from source or run on another platform, see [Build & run](#build--run).
+
 ## Build & run
 
 ```sh

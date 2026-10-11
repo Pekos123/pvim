@@ -54,8 +54,18 @@
 - The no-file scratch buffer in `src/main.c` inserts its starter line and then
   resets `buffer.dirty = 0`, so `:q` on a freshly opened scratch quits without
   needing `:q!` (the starter text is not an unsaved edit).
-- `.gitignore` drops the build outputs (`/bin/`, `*.o`, `*.d`,
+- `.gitignore` drops the build outputs (`/bin/`, `*.o`, `*.o.tmp`, `*.d`,
   `compile_commands.json`), the clangd `/.cache/` and the local `/.opencode/`.
+- `.github/workflows/release.yml` runs on a `v*` tag: `make`, then a static link
+  (`clang -static src/*.o -o pvim-linux-x86_64`) for a self-contained 64-bit
+  x86_64 binary, uploaded as a workflow artifact and attached to a GitHub
+  Release by `softprops/action-gh-release` (needs `contents: write`).
+- `install.sh` (POSIX sh) downloads the latest `pvim-linux-x86_64` release
+  asset with curl or wget, sanity-checks it is a 64-bit ELF, makes it executable
+  (`chmod 755`) and moves it to `/usr/local/bin/pvim` (sudo only when the
+  directory is not writable), then reports whether `/usr/local/bin` is on
+  `PATH`. It backs the README "Quick Install (Linux)" section. Overridable:
+  `PVIM_REPO`, `PVIM_VERSION`, `PVIM_BINDIR`, `PVIM_URL`.
 
 ## Commands
 - `:diag` (also `:diagnostics`, `:diags`, `:problems`, `:errors`) opens a floating

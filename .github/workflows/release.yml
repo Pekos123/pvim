@@ -1,0 +1,47 @@
+name: Release
+
+# Build a standalone Linux binary and publish it whenever a version tag is
+# pushed, e.g.:
+#   git tag v0.2.0 && git push origin v0.2.0
+on:
+  push:
+    tags:
+      - 'v*'
+
+# softprops/action-gh-release needs write access to create the release.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ubuntu-latest ships clang, but fall back to apt if it ever doesn't.
+      - name: Ensure clang
+        run: command -v clang || (sudo apt-get update && sudo apt-get install -y --no-install-recommends clang)
+
+      # `make` compiles every object with the strict C99 flags; linking with
+      # -static makes the result self-contained (only needs a Linux kernel).
+      - name: Build standalone binary
+        run: |
+          make
+          clang -static src/*.o -o pvim-linux-x86_64
+          chmod +x pvim-linux-x86_64
+          file pvim-linux-x86_64
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pvim-linux-x86_64
+          path: pvim-linux-x86_64
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pvim-linux-x86_64
+          fail_on_unmatched_files: true
+          generate_release_notes: true
