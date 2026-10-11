@@ -52,8 +52,11 @@ The build uses clang with strict C99 flags (`-Wall -Wextra -Wpedantic
 
 Editing is vim-flavoured: `i` insert, `Esc` back to normal mode, `d` + motion
 to delete, `yy` to yank the current line, `p` to paste it below, `:` for
-`w`/`q`/`x` commands, `u`/`Ctrl-r` undo/redo. In visual mode `y` yanks the
-selection and `p` pastes the register over it. `:diag` (also `:problems` /
+`w`/`q`/`x` commands, `u`/`Ctrl-r` undo/redo. `v`/`V`/`Ctrl-v` start
+character-, line- and block-wise visual selection; `y` yanks the selection and
+`p` pastes the register over it, and in a block selection `I` inserts text on
+every selected line (see [Visual block insert](#visual-block-insert)). `:diag`
+(also `:problems` /
 `:errors`) opens a floating panel listing every diagnostic in the file (see
 [Floating windows](#floating-windows-popups)); `-` opens the floating file
 explorer (see [File explorer](#file-explorer)). Completions from clangd, the
@@ -213,6 +216,21 @@ The clipboard itself is reached through the usual helpers — `wl-copy`/`wl-past
 (Wayland), `xclip`, `xsel`, `pbcopy`/`pbpaste` — tried in that order. Copying
 falls back to the terminal's **OSC 52** escape when no helper is installed, so
 it keeps working over SSH.
+
+## Visual block insert
+
+In a block selection (`Ctrl-v`), press **`I`** to insert text on **every** line
+of the block at its left column. You type on the first line as usual (the status
+bar shows `-- VISUAL BLOCK INSERT --`); press `Esc` and the typed text is replayed
+on all the other selected lines at the same column.
+
+- `Backspace` edits the run before it is applied, and `Tab` inserts four spaces,
+  just like insert mode.
+- Lines shorter than the target column are padded with spaces so the inserted
+  text lines up.
+- The whole operation — typing plus the multi-line application — is a **single
+  undo step**, so one `u` removes it everywhere.
+- `I` outside a block selection does nothing.
 
 ## Autocomplete
 

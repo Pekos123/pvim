@@ -110,6 +110,8 @@ static int parse_bind_key(const char *name) {
         const char *end = strchr(p, '>');
         if (!end || end == p) return -1;
         size_t n = (size_t)(end - p);
+        
+        /* Create hashmap e.g. hashmap["esc"] = KEY_ESC */
         if (n == 1) {
             code = (unsigned char)p[0];
         } else if (eq_ci(p, n, "esc")) {
@@ -311,6 +313,8 @@ void editor_init(EditorState *state) {
     
     state->v_start_x = 0;
     state->v_start_y = 0;
+    state->visual_type = VISUAL_CHAR;
+    state->yank_type = VISUAL_CHAR;
     
     state->row_offset = 0;
     state->col_offset = 0;
@@ -945,8 +949,11 @@ static void editor_completion_draw(EditorState *state) {
     FloatWindow *win = windows_add(&state->windows, x, y, width, h, NULL,
                                    WIN_BORDER_ROUND, 20);
     if (!win) return;
-    win->scroll = scroll;
-    win->selected = sel;
+    /* The visible page is stored at rows 0..shown-1, so the window itself does
+     * not scroll; the selected row is the page-relative index. (The renderer
+     * adds win->scroll, so setting it here would offset the page twice.) */
+    win->scroll = 0;
+    win->selected = sel - scroll;
 
     char line[420];
     for (int i = 0; i < shown; i++) {
@@ -1409,12 +1416,23 @@ void editor_get_selection(EditorState *state, int *sy, int *sx, int *ey, int *ex
     if (*ex < -1) *ex = -1;
 }
 
-static void editor_yank_text(EditorState *state, const char *text, int len) {
+static void editor_set_yank(EditorState *state, const char *text, int len,
+                            int type) {
     free(state->yank_buf);
     state->yank_buf = malloc((size_t)len + 1);
+    if (!state->yank_buf) {
+        state->yank_len = 0;
+        state->yank_type = VISUAL_CHAR;
+        return;
+    }
     memcpy(state->yank_buf, text, (size_t)len);
     state->yank_buf[len] = '\0';
     state->yank_len = len;
+    state->yank_type = type;
+}
+
+static void editor_yank_text(EditorState *state, const char *text, int len) {
+    editor_set_yank(state, text, len, VISUAL_CHAR);
 }
 
 /* Copy row `y` into the yank register, including its newline, so a later paste
@@ -1427,7 +1445,7 @@ static void editor_yank_row(EditorState *state, int y) {
     memcpy(text, state->buffer.rows[y].chars, (size_t)len);
     text[len] = '\n';
     text[len + 1] = '\0';
-    editor_yank_text(state, text, len + 1);
+    editor_set_yank(state, text, len + 1, VISUAL_LINE);
     free(text);
 }
 
@@ -1503,7 +1521,126 @@ static void editor_delete_direction(EditorState *state, int key) {
 
 void editor_visual_delete(EditorState *state);
 
+/* Normalized row range covered by a line- or block-wise visual selection. */
+static void editor_visual_rows(EditorState *state, int *r0, int *r1) {
+    int a = state->v_start_y, b = state->cy;
+    if (a > b) { int t = a; a = b; b = t; }
+    int n = state->buffer.num_rows;
+    if (a < 0) a = 0;
+    if (b > n - 1) b = n - 1;
+    if (b < a) b = a;
+    *r0 = a;
+    *r1 = b;
+}
+
+/* Inclusive render-column range of a block-wise selection: the screen columns
+ * between the anchor and the cursor. */
+static void editor_block_cols(EditorState *state, int *lo, int *hi) {
+    int arx = 0;
+    if (state->v_start_y >= 0 && state->v_start_y < state->buffer.num_rows)
+        arx = buffer_row_cx_to_rx(&state->buffer.rows[state->v_start_y],
+                                  state->v_start_x);
+    int crx = state->rx;
+    if (arx < crx) { *lo = arx; *hi = crx; }
+    else           { *lo = crx; *hi = arx; }
+}
+
+/* Character index whose render cell contains column `rx`, clamped to the row
+ * (returns the last char when `rx` is past the end). */
+static int editor_rx_to_cx(const erow *row, int rx) {
+    if (rx <= 0) return 0;
+    int cx = 0;
+    while (cx < row->size && buffer_row_cx_to_rx(row, cx) <= rx)
+        cx++;
+    return cx > 0 ? cx - 1 : 0;
+}
+
+/* Insertion index for a block insert landing at render column `col` on `row`.
+ * Short rows are padded out to `col` with spaces (Vim behavior) so the inserted
+ * text lines up with the other rows; a row already at/after `col` returns the
+ * matching character index (its end when `col` is exactly the row's width). */
+static int block_insert_index(EditorBuffer *buf, erow *row, int col) {
+    if (col <= 0) return 0;
+    while (row->rsize < col)
+        buffer_row_insert_char(buf, row, row->size, ' ');
+    if (row->rsize == col) return row->size;
+    return editor_rx_to_cx(row, col);
+}
+
+/* Line-wise selection: every whole row in the range, newline-terminated. */
+static char *editor_line_selection_to_string(EditorState *state, int *out_len) {
+    if (state->buffer.num_rows == 0) {
+        char *empty = malloc(1);
+        empty[0] = '\0';
+        if (out_len) *out_len = 0;
+        return empty;
+    }
+    int r0, r1;
+    editor_visual_rows(state, &r0, &r1);
+    size_t cap = 0;
+    for (int r = r0; r <= r1; r++)
+        cap += (size_t)state->buffer.rows[r].size + 1;
+    char *out = malloc(cap + 1);
+    size_t o = 0;
+    for (int r = r0; r <= r1; r++) {
+        int sz = state->buffer.rows[r].size;
+        memcpy(out + o, state->buffer.rows[r].chars, (size_t)sz);
+        o += (size_t)sz;
+        out[o++] = '\n';
+    }
+    out[o] = '\0';
+    if (out_len) *out_len = (int)o;
+    return out;
+}
+
+/* Block-wise selection: on each row the text inside the screen-column range,
+ * separated by newlines (one register line per selected row). */
+static char *editor_block_selection_to_string(EditorState *state, int *out_len) {
+    if (state->buffer.num_rows == 0) {
+        char *empty = malloc(1);
+        empty[0] = '\0';
+        if (out_len) *out_len = 0;
+        return empty;
+    }
+    int r0, r1, lo, hi;
+    editor_visual_rows(state, &r0, &r1);
+    editor_block_cols(state, &lo, &hi);
+
+    size_t cap = 0;
+    for (int r = r0; r <= r1; r++) {
+        erow *row = &state->buffer.rows[r];
+        if (lo >= row->rsize) continue;
+        int x0 = editor_rx_to_cx(row, lo);
+        int x1 = editor_rx_to_cx(row, hi);
+        if (x1 >= row->size) x1 = row->size - 1;
+        if (x1 >= x0) cap += (size_t)(x1 - x0 + 1) + 1;
+    }
+    char *out = malloc(cap + 1);
+    size_t o = 0;
+    int first = 1;
+    for (int r = r0; r <= r1; r++) {
+        erow *row = &state->buffer.rows[r];
+        if (lo >= row->rsize) continue;
+        int x0 = editor_rx_to_cx(row, lo);
+        int x1 = editor_rx_to_cx(row, hi);
+        if (x1 >= row->size) x1 = row->size - 1;
+        if (x1 < x0) continue;
+        if (!first) out[o++] = '\n';
+        first = 0;
+        memcpy(out + o, row->chars + x0, (size_t)(x1 - x0 + 1));
+        o += (size_t)(x1 - x0 + 1);
+    }
+    out[o] = '\0';
+    if (out_len) *out_len = (int)o;
+    return out;
+}
+
 static char *editor_selection_to_string(EditorState *state, int *out_len) {
+    if (state->visual_type == VISUAL_LINE)
+        return editor_line_selection_to_string(state, out_len);
+    if (state->visual_type == VISUAL_BLOCK)
+        return editor_block_selection_to_string(state, out_len);
+
     int sy, sx, ey, ex;
     editor_get_selection(state, &sy, &sx, &ey, &ex);
 
@@ -1549,17 +1686,62 @@ static char *editor_selection_to_string(EditorState *state, int *out_len) {
 void editor_yank(EditorState *state) {
     int len;
     char *text = editor_selection_to_string(state, &len);
-    editor_yank_text(state, text, len);
+    editor_set_yank(state, text, len, state->visual_type);
     free(text);
     editor_set_status_message(state, "Yanked %d char%s", len, len == 1 ? "" : "s");
 }
 
 void editor_visual_delete(EditorState *state) {
     if (state->buffer.num_rows == 0) return;
+    EditorBuffer *buf = &state->buffer;
+
+    if (state->visual_type == VISUAL_LINE) {
+        int r0, r1;
+        editor_visual_rows(state, &r0, &r1);
+        for (int r = r1; r >= r0; r--)
+            buffer_del_row(buf, r);
+        if (buf->num_rows == 0)
+            buffer_insert_row(buf, 0, "", 0);
+        state->cy = r0;
+        if (state->cy > buf->num_rows - 1) state->cy = buf->num_rows - 1;
+        if (state->cy < 0) state->cy = 0;
+        state->cx = 0;
+        state->rx = 0;
+        editor_set_status_message(state, "Deleted selection");
+        return;
+    }
+
+    if (state->visual_type == VISUAL_BLOCK) {
+        int r0, r1, lo, hi;
+        editor_visual_rows(state, &r0, &r1);
+        editor_block_cols(state, &lo, &hi);
+        for (int r = r0; r <= r1; r++) {
+            erow *row = &buf->rows[r];
+            if (lo >= row->rsize) continue;
+            int x0 = editor_rx_to_cx(row, lo);
+            int x1 = editor_rx_to_cx(row, hi);
+            if (x1 >= buf->rows[r].size) x1 = buf->rows[r].size - 1;
+            while (x1 >= x0 && x1 >= 0) {
+                buffer_row_del_char(buf, &buf->rows[r], x1);
+                x1--;
+            }
+        }
+        state->cy = r0;
+        if (state->cy > buf->num_rows - 1) state->cy = buf->num_rows - 1;
+        if (state->cy < 0) state->cy = 0;
+        int nx = editor_rx_to_cx(&buf->rows[state->cy], lo);
+        int rowlen = buf->rows[state->cy].size;
+        if (nx > rowlen) nx = rowlen;
+        state->cx = nx;
+        state->rx = buffer_row_cx_to_rx(&buf->rows[state->cy], state->cx);
+        editor_set_status_message(state, "Deleted selection");
+        return;
+    }
+
+    /* Character-wise selection. */
     int sy, sx, ey, ex;
     editor_get_selection(state, &sy, &sx, &ey, &ex);
 
-    EditorBuffer *buf = &state->buffer;
     if (sy == ey) {
         for (int i = sx; i <= ex; i++)
             buffer_row_del_char(buf, &buf->rows[sy], sx);
@@ -1649,17 +1831,52 @@ void editor_insert_text(EditorState *state, const char *text, int len) {
         ? buffer_row_cx_to_rx(&state->buffer.rows[state->cy], state->cx) : 0;
 }
 
+/* Column-wise paste of a block register: each stored line is inserted at the
+ * cursor column on consecutive rows, creating rows as needed (like vim's
+ * block put). */
+static void editor_insert_block(EditorState *state, const char *text, int len) {
+    EditorBuffer *buf = &state->buffer;
+    int top = state->cy;
+    int col = state->cx;
+    int row = top;
+    int start = 0;
+
+    for (int i = 0; i <= len; i++) {
+        if (i != len && text[i] != '\n') continue;
+        while (row >= buf->num_rows)
+            buffer_insert_row(buf, buf->num_rows, "", 0);
+        erow *r = &buf->rows[row];
+        int at = col;
+        if (at > r->size) at = r->size;
+        for (int k = 0; k < i - start; k++)
+            buffer_row_insert_char(buf, r, at + k, (unsigned char)text[start + k]);
+        row++;
+        start = i + 1;
+    }
+
+    state->cy = top;
+    if (state->cy > buf->num_rows - 1) state->cy = buf->num_rows - 1;
+    if (state->cy < 0) state->cy = 0;
+    int rowlen = buf->rows[state->cy].size;
+    state->cx = (col > rowlen) ? rowlen : col;
+    state->rx = buffer_row_cx_to_rx(&buf->rows[state->cy], state->cx);
+}
+
 void editor_paste(EditorState *state) {
     if (!state->yank_buf || state->yank_len == 0) {
         editor_set_status_message(state, "Nothing to paste");
         return;
     }
+    int block = (state->yank_type == VISUAL_BLOCK);
     /* In visual mode the register replaces the selection (like vim). */
     if (state->mode == MODE_VISUAL) {
         editor_visual_delete(state);
         state->mode = MODE_NORMAL;
     }
-    editor_insert_text(state, state->yank_buf, state->yank_len);
+    if (block)
+        editor_insert_block(state, state->yank_buf, state->yank_len);
+    else
+        editor_insert_text(state, state->yank_buf, state->yank_len);
     editor_set_status_message(state, "Pasted %d char%s", state->yank_len, state->yank_len == 1 ? "" : "s");
 }
 
@@ -1804,6 +2021,12 @@ static void editor_run_cmd(EditorState *state, const char *cmdline) {
     }
 }
 
+/* Shift+V may arrive as the plain 'V' byte or, under the kitty keyboard
+ * protocol, as a modified `v` combo. Match both. */
+static int is_shift_v(int c) {
+    return c == 'V' || c == terminal_combo(KEY_MOD_SHIFT, 'v');
+}
+
 void editor_process_keypress(EditorState *state) {
     int c = terminal_read_key();
 
@@ -1826,7 +2049,8 @@ void editor_process_keypress(EditorState *state) {
     /* Clipboard shortcuts (default Super+y / Super+p). They use modifier-encoded
      * key values, so they never collide with plain typing, and are handled
      * everywhere the user is editing rather than entering a command or search. */
-    if (state->mode != MODE_COMMAND && state->mode != MODE_SEARCH) {
+    if (state->mode != MODE_COMMAND && state->mode != MODE_SEARCH &&
+        state->mode != MODE_BLOCK_INSERT) {
         if (c && c == state->clipboard_copy_key) {
             state->pending_op = 0;
             editor_clipboard_copy(state);
@@ -1843,6 +2067,16 @@ void editor_process_keypress(EditorState *state) {
 
     switch (state->mode) {
         case MODE_NORMAL:
+            /* Shift+V starts a line-wise visual selection. */
+            if (is_shift_v(c)) {
+                state->mode = MODE_VISUAL;
+                state->visual_type = VISUAL_LINE;
+                state->v_start_x = state->cx;
+                state->v_start_y = state->cy;
+                state->pending_op = 0;
+                editor_set_status_message(state, "-- VISUAL LINE --");
+                break;
+            }
             switch (c) {
                 case ':': 
                     state->mode = MODE_COMMAND; 
@@ -1859,10 +2093,20 @@ void editor_process_keypress(EditorState *state) {
                     break;
                 case 'v':
                     state->mode = MODE_VISUAL;
+                    state->visual_type = VISUAL_CHAR;
                     state->v_start_x = state->cx;
                     state->v_start_y = state->cy;
                     state->pending_op = 0;
                     editor_set_status_message(state, "-- VISUAL --");
+                    break;
+                case CTRL_KEY('v'):
+                    /* Block-wise (rectangular) visual selection. */
+                    state->mode = MODE_VISUAL;
+                    state->visual_type = VISUAL_BLOCK;
+                    state->v_start_x = state->cx;
+                    state->v_start_y = state->cy;
+                    state->pending_op = 0;
+                    editor_set_status_message(state, "-- VISUAL BLOCK --");
                     break;
                 case '/':
                     /* Incremental search: type in the status bar, matches are
@@ -1949,15 +2193,67 @@ void editor_process_keypress(EditorState *state) {
             }
             break;
         case MODE_VISUAL:
-            switch (c) {
-                case KEY_ESC:
-                case 'v':
+            /* `V` / Ctrl-V switch the selection granularity; pressing the key
+             * of the active type again leaves visual mode (same as `v`). */
+            if (is_shift_v(c)) {
+                if (state->visual_type == VISUAL_LINE) {
                     state->mode = MODE_NORMAL;
                     editor_set_status_message(state, "");
+                } else {
+                    state->visual_type = VISUAL_LINE;
+                    editor_set_status_message(state, "-- VISUAL LINE --");
+                }
+                break;
+            }
+            if (c == CTRL_KEY('v')) {
+                if (state->visual_type == VISUAL_BLOCK) {
+                    state->mode = MODE_NORMAL;
+                    editor_set_status_message(state, "");
+                } else {
+                    state->visual_type = VISUAL_BLOCK;
+                    editor_set_status_message(state, "-- VISUAL BLOCK --");
+                }
+                break;
+            }
+            switch (c) {
+                case KEY_ESC:
+                    state->mode = MODE_NORMAL;
+                    editor_set_status_message(state, "");
+                    break;
+                case 'v':
+                    if (state->visual_type == VISUAL_CHAR) {
+                        state->mode = MODE_NORMAL;
+                        editor_set_status_message(state, "");
+                    } else {
+                        state->visual_type = VISUAL_CHAR;
+                        editor_set_status_message(state, "-- VISUAL --");
+                    }
                     break;
                 case 'y':
                     editor_yank(state);
                     state->mode = MODE_NORMAL;
+                    break;
+                case 'I':
+                    /* Block insert: start typing on the first row of the block
+                     * at its left column; <Esc> replicates to the rest. */
+                    if (state->visual_type == VISUAL_BLOCK &&
+                        state->buffer.num_rows > 0) {
+                        int r0, r1, lo, hi;
+                        editor_visual_rows(state, &r0, &r1);
+                        editor_block_cols(state, &lo, &hi);
+                        state->bi_r0 = r0;
+                        state->bi_r1 = r1;
+                        state->bi_col = lo;
+                        state->bi_cx = editor_rx_to_cx(&state->buffer.rows[r0], lo);
+                        state->bi_padded = 0;
+                        state->bi_len = 0;
+                        state->bi_text[0] = '\0';
+                        state->cy = r0;
+                        state->cx = state->bi_cx;
+                        state->rx = lo;
+                        state->mode = MODE_BLOCK_INSERT;
+                        editor_set_status_message(state, "-- VISUAL BLOCK INSERT --");
+                    }
                     break;
                 case 'd':
                 case 'x':
@@ -2072,6 +2368,72 @@ void editor_process_keypress(EditorState *state) {
                        completion_continue_char(c)) {
                 state->completion_manual = 0;
                 editor_completion_trigger(state);
+            }
+            break;
+        }
+        case MODE_BLOCK_INSERT: {
+            /* Vim-style block insert (`I`): the text is typed live on the first
+             * row of the block; <Esc> replays it on the remaining rows at the
+             * same render column. Backspace edits only the typed run. */
+            if (c == KEY_ESC) {
+                for (int r = state->bi_r0 + 1; r <= state->bi_r1; r++) {
+                    erow *row = &state->buffer.rows[r];
+                    int at = block_insert_index(&state->buffer, row, state->bi_col);
+                    for (int i = 0; i < state->bi_len; i++)
+                        buffer_row_insert_char(&state->buffer, row, at + i,
+                                               (unsigned char)state->bi_text[i]);
+                }
+                state->mode = MODE_NORMAL;
+                state->cy = state->bi_r0;
+                if (state->cy > state->buffer.num_rows - 1)
+                    state->cy = state->buffer.num_rows - 1;
+                if (state->cy < 0) state->cy = 0;
+                state->cx = state->bi_cx + state->bi_len;
+                int rowlen = (state->cy < state->buffer.num_rows)
+                    ? state->buffer.rows[state->cy].size : 0;
+                if (state->cx > rowlen) state->cx = rowlen;
+                if (state->cx < 0) state->cx = 0;
+                state->rx = (state->cy < state->buffer.num_rows)
+                    ? buffer_row_cx_to_rx(&state->buffer.rows[state->cy], state->cx)
+                    : 0;
+                editor_end_change(state);
+                editor_set_status_message(state, "");
+            } else if (c == BACKSPACE) {
+                if (state->bi_len > 0) {
+                    buffer_row_del_char(&state->buffer,
+                        &state->buffer.rows[state->bi_r0],
+                        state->bi_cx + state->bi_len - 1);
+                    state->bi_len--;
+                    state->bi_text[state->bi_len] = '\0';
+                    state->cy = state->bi_r0;
+                    state->cx = state->bi_cx + state->bi_len;
+                    state->rx = buffer_row_cx_to_rx(
+                        &state->buffer.rows[state->bi_r0], state->cx);
+                }
+            } else if (c == KEY_TAB || (c >= 32 && c <= 126)) {
+                /* Tab mirrors INSERT mode: PVIM_TAB_STOP spaces. Both the tab
+                 * spaces and plain characters join the replay run. */
+                int count = (c == KEY_TAB) ? PVIM_TAB_STOP : 1;
+                if (state->bi_len <= (int)sizeof(state->bi_text) - 1 - count) {
+                    editor_begin_change(state);
+                    if (!state->bi_padded) {
+                        state->bi_cx = block_insert_index(&state->buffer,
+                            &state->buffer.rows[state->bi_r0], state->bi_col);
+                        state->bi_padded = 1;
+                    }
+                    for (int i = 0; i < count; i++) {
+                        char ch = (c == KEY_TAB) ? ' ' : (char)c;
+                        buffer_row_insert_char(&state->buffer,
+                            &state->buffer.rows[state->bi_r0],
+                            state->bi_cx + state->bi_len, ch);
+                        state->bi_text[state->bi_len++] = ch;
+                    }
+                    state->bi_text[state->bi_len] = '\0';
+                    state->cy = state->bi_r0;
+                    state->cx = state->bi_cx + state->bi_len;
+                    state->rx = buffer_row_cx_to_rx(
+                        &state->buffer.rows[state->bi_r0], state->cx);
+                }
             }
             break;
         }

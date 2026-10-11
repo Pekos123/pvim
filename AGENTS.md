@@ -91,6 +91,51 @@
   clipboard. Both go through `editor_paste` / `editor_clipboard_paste`.
 - `dd` yanks + deletes (unchanged); the register round-trips whole lines.
 
+## Visual selection modes (`v` / `V` / Ctrl-V)
+- `EditorState.visual_type` (`VISUAL_CHAR` / `VISUAL_LINE` / `VISUAL_BLOCK`,
+  see `include/editor.h`) picks the granularity. Normal mode `v` starts
+  character-wise, `V` (Shift+v, matched as the plain `V` byte or kitty's
+  `KEY_MOD_SHIFT`+`v` combo) line-wise, Ctrl-V block-wise. Inside visual mode
+  the three keys switch granularity, and pressing the active one again leaves
+  visual mode. The status line/message shows `-- VISUAL [LINE|BLOCK] --` and the
+  mode name is `VISUAL` / `V-LINE` / `V-BLOCK`.
+- The anchor stays in `v_start_x`/`v_start_y`; `editor_visual_rows` normalizes
+  the row range and `editor_block_cols` the render-column range (screen columns,
+  so tabs line up). `editor_rx_to_cx` maps a column back to a character index
+  per row.
+- `editor_selection_to_string` (yank / clipboard copy) and `editor_visual_delete`
+  branch on `visual_type`: line-wise takes whole rows (newline-terminated),
+  block-wise takes the rectangle on each row (newline-separated). The yank
+  register carries the shape in `state->yank_type`, and `editor_paste` uses
+  `editor_insert_block` for a block register so the columns paste at the cursor
+  on consecutive rows.
+- `display.c` highlights line-wise selections to the end of each row and
+  block-wise selections as a screen-column rectangle.
+- `display_append_row` paints a line-wise selection as a **full-width band**
+  across the text area, filling the tail with `HL_SELECTION` spaces, and pads a
+  block-wise selection with virtual selected spaces out to the block's end
+  column. This is what makes an **empty** (or short) selected line visible: it
+  has no characters to reverse-video, so without the padding its selection was
+  invisible even though delete/yank still acted on it. A row filled by the band
+  suppresses the inline diagnostic (`room` is derived from the columns `used`).
+- Character-wise (`v`) keeps its precise cells but additionally marks the
+  **newline** cell (one column past the text) whenever the newline is part of
+  the selection: rows before the end row, plus an empty end row (whose only cell
+  is its newline). That single `HL_SELECTION` cell is what makes a blank line
+  visible in `v`, matching the line/block bands.
+- Block insert (`I` in Visual Block) is its own `MODE_BLOCK_INSERT` (see
+  `include/editor.h`): the text is typed live on the first row of the block at
+  the block's **left** render column (`editor_block_cols` low edge) and, on
+  `<Esc>`, replayed on `bi_r0+1..bi_r1` through `block_insert_index`, which pads
+  short rows out to the column with spaces (Vim behavior). The session lives in
+  `bi_r0`/`bi_r1`/`bi_col`/`bi_cx`/`bi_padded` and the replay run `bi_text`/
+  `bi_len`; backspace pops the run. `editor_begin_change` fires on the first
+  keystroke and `editor_end_change` on `<Esc>`, so typing *and* the multi-row
+  application are one atomic undo step (nothing typed ⇒ no undo entry). Tab
+  inserts `PVIM_TAB_STOP` spaces, matching INSERT mode. The status message is
+  `-- VISUAL BLOCK INSERT --` and the mode name is `V-BLOCK-INSERT`. `I` outside
+  Visual Block is a no-op.
+
 ## Key bindings (`[bindings]` in pvim.conf)
 - `src/config.c` gains `pvim_config_section("bindings", lines, max)`, a
   section-aware reader returning the trimmed, non-comment lines inside a
@@ -177,7 +222,14 @@
   label of `" malloc"` becomes `"malloc"`).
 - UI: the popup in `window.c` is anchored below the cursor, with a 10-row
   viewport and scroll; the snapshot (`state->completion_items`) is owned by the
-  editor and freed in `editor_free`. Each row is two aligned columns: the clean
+  editor and freed in `editor_free`. `editor_completion_draw` stores the visible
+  page at rows `0..shown-1` (page-relative) and leaves `win->scroll = 0`, with
+  `win->selected` the page-relative index — the same convention as the diag
+  panel and the explorer. The renderer adds `win->scroll` when indexing the
+  stored lines, so setting it while already storing a page offsets the list
+  twice (wrong items and blank rows at the bottom) once the candidates exceed
+  the viewport; `e2e_completion_menu.py` guards this with a 15-item scroll phase.
+  Each row is two aligned columns: the clean
   label on the left and, right-aligned, the signature (return type + name +
   parameter list for functions), the kind tag and a source badge (`[LSP]`,
   `[Snip]`, `[Hdr]`, `[Buffer]`). `editor_completion_draw` computes the widths, builds the
@@ -217,6 +269,19 @@
   - `e2e_diag_panel.py` — `:diag` lists diagnostics.
   - `e2e_yank_paste.py` — `yy` yanks a line, `p` pastes below, visual `p`
     replaces the selection.
+  - `e2e_visual_block_line.py` — line-wise (`V`) and block-wise (Ctrl-V) visual
+    selection: whole rows vs. a screen-column rectangle, spanning tabs; `d`
+    deletes, `y`+`p` round-trips the shape, granularity switching and exiting,
+    and an empty buffer doesn't fault. It also checks the reverse-video band on
+    a **blank** selected line (full-width for `V`, the block's width for
+    Ctrl-V) and the single **newline** cell for character-wise `v`, by scanning
+    the raw byte stream for a reverse-video SGR on a row whose visible text is
+    blank.
+  - `e2e_visual_block_insert.py` — Visual Block `I`: the typed text is replayed
+    on every row of the block at the block's left column, short rows are padded
+    with spaces, Tab inserts `PVIM_TAB_STOP` spaces, backspace trims the run,
+    one `u` undoes the whole session, `I` outside Visual Block is a no-op, and
+    the status shows `-- VISUAL BLOCK INSERT --`.
   - `e2e_clipboard_visual.py` — `clipboard_mod+p` replaces the selection in
     visual mode (fake `wl-paste` on PATH).
   - `e2e_completion_words.py` — with no server (a `.txt` file), typing a prefix
@@ -230,8 +295,10 @@
     right-aligned and line up across rows, the label / dimmed detail / source
     badge / selected-row block / background / border each use the configured
     `completion_menu*` role, and the selected row's block spans the full content
-    width. An optional clangd phase (skipped when it is missing) checks that a
-    function shows its return type and parameter list in the detail colour.
+    width. A 15-item scroll phase checks the viewport never paints blank rows
+    and shows the right slice after scrolling. An optional clangd phase (skipped
+    when it is missing) checks that a function shows its return type and
+    parameter list in the detail colour.
   - `e2e_completion_include.py` — `#include` completion: with clangd, typing
     inside `#include <...` offers headers and accepting yields
     `#include <stdio.h>`; with no server (a `.txt` file) the local scan backs the

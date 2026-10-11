@@ -15,6 +15,7 @@ typedef enum EditorMode {
     MODE_INSERT,
     MODE_COMMAND,
     MODE_VISUAL,
+    MODE_BLOCK_INSERT, /* block visual `I`: typed on row 0, applied on <Esc> */
     MODE_SEARCH,
     MODE_EXPLORER
 } EditorMode;
@@ -25,6 +26,15 @@ typedef enum LineNumberMode {
     LN_ABSOLUTE = 1,
     LN_RELATIVE = 2
 } LineNumberMode;
+
+/* Visual selection granularity, picked on entering visual mode:
+ * `v` character-wise, `V`/Shift-v line-wise, Ctrl-V block-wise. The same
+ * values tag the yank register so a paste can reproduce the shape. */
+typedef enum VisualType {
+    VISUAL_CHAR = 0,
+    VISUAL_LINE = 1,
+    VISUAL_BLOCK = 2
+} VisualType;
 
 /* A full copy of the buffer contents at a point in time. */
 typedef struct Snapshot {
@@ -53,7 +63,20 @@ typedef struct EditorState {
     EditorMode mode;
     int cx, cy;
     int rx;
-    int v_start_x, v_start_y; // Visual selection start point
+    int v_start_x, v_start_y; // Visual selection start point (anchor)
+    VisualType visual_type;   // character / line / block selection
+    int yank_type;            // VisualType tag of the register contents
+    /* Block insert (`I` in Visual Block): text is typed live on the first row
+     * of the block and, on <Esc>, replicated to `bi_r0+1..bi_r1` at the same
+     * render column `bi_col`. `bi_cx` is where the run starts in row `bi_r0`
+     * (set once the row is padded), `bi_text`/`bi_len` are exactly what was
+     * typed so backspace can pop it and the rest of the rows can replay it. */
+    int bi_r0, bi_r1;
+    int bi_col;
+    int bi_cx;
+    int bi_padded;
+    char bi_text[256];
+    int bi_len;
     int row_offset, col_offset;
     int screen_rows;
     int screen_cols;
