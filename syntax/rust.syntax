@@ -1,0 +1,20 @@
+# Rust syntax rules for pvim.
+
+filetype = rust
+
+ext = .rs
+
+single_comment = //
+multi_comment_start = /*
+multi_comment_end = */
+
+flags = numbers strings
+
+# Control-flow / declaration keywords.
+keywords = as async await break const continue crate dyn else enum extern fn for if
+keywords = impl in let loop match mod move pub return self Self static struct super
+keywords = trait type unsafe use where while yield
+
+# Primitive scalar types.
+types = bool char i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 str
+types = String Vec Option Result Box Rc Arc

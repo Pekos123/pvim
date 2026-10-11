@@ -1,0 +1,15 @@
+# POSIX shell / bash syntax rules for pvim.
+
+filetype = shell
+
+ext = .sh .bash .zsh
+
+# Match "#!/bin/sh", "#!/usr/bin/env bash", ...
+shebang = sh bash zsh dash
+
+single_comment = #
+
+flags = numbers strings
+
+keywords = if then else elif fi for while until do done case esac function in
+keywords = return break continue exit export local readonly unset eval exec shift select

@@ -1,0 +1,24 @@
+# pvim theme: mono — one colour for everything (try names, e.g. `white`)
+#
+# A good starting point when you want to experiment: every role uses the same
+# value. Change the value on one line to restyle just that kind of token.
+
+comment   = white
+mlcomment = white
+keyword1  = orange
+keyword2  = green
+string    = blue
+number    = blue
+macro     = cyan
+variable  = white
+function  = yellow
+match     = yellow
+selection = blue
+
+# Autocomplete menu (see default.theme for the role meanings).
+completion_menu        = white
+completion_menu_detail = white
+completion_menu_source = cyan
+completion_menu_select = blue
+completion_menu_bg     = black
+completion_menu_border = cyan

@@ -1,0 +1,24 @@
+# pvim theme: solarized (XTerm-256 approximations of the Solarized dark palette)
+#
+# Pick it with `theme = solarized` in pvim.conf, or run
+# `PVIM_THEME=solarized bin/pvim file.c`.
+
+comment   = 244   # base01
+mlcomment = 244
+keyword1  = 166   # orange
+keyword2  = 64    # green
+string    = 37    # cyan
+number    = 125   # magenta
+macro     = 33    # blue
+variable  = 136   # yellow
+function  = 39    # bright blue
+match     = 226
+selection = 236   # base02-ish block; -1 = syntax colour
+
+# Autocomplete menu (see default.theme for the role meanings).
+completion_menu        = 230
+completion_menu_detail = 244
+completion_menu_source = 37
+completion_menu_select = 236
+completion_menu_bg     = 235
+completion_menu_border = 37

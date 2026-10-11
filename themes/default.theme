@@ -1,0 +1,52 @@
+# pvim theme: default
+#
+# One `role = colour` per line. A colour is either an XTerm-256 palette
+# index (0-255), a colour name (red, green, orange, pink, ...), or
+# `default` / `none` / -1 for the terminal's own foreground colour.
+#
+# The role names are the semantic highlight types:
+#   comment   single-line comments     keyword1  control-flow keywords
+#   mlcomment multi-line comments      keyword2  type keywords / type names
+#   string    "..." and '...'          number    numeric literals
+#   macro     #-lines and ALL_CAPS     variable  plain identifiers
+#   function  identifier before "("
+#
+# Two roles are drawn as reverse-video *blocks* (like a terminal selection),
+# so their colour becomes the block's background:
+#   match, search   highlighted search matches
+#   selection       the visual selection (-1 = reuse the syntax colour)
+# Add `search_bold = on` / `selection_bold = on` (below) to brighten them.
+#
+# `type`/`types` are aliases for keyword2; `keyword` for keyword1.
+
+comment   = 245
+mlcomment = 245
+keyword1  = 214
+keyword2  = 40
+string    = 204
+number    = 203
+macro     = 33
+variable  = 81
+function  = 228
+match     = 227   # search match block background
+selection = 240   # visual selection block background (-1 = syntax colour)
+
+# Autocomplete (completion) menu colours. The right column shows the function
+# signature and a source badge ([LSP], [Snip] or [Buffer]); the left column is
+# the clean candidate label.
+#   completion_menu         candidate label
+#   completion_menu_detail  dimmed signature / detail
+#   completion_menu_source  kind tag and source badge
+#   completion_menu_select  selected-row background block
+#   completion_menu_bg      popup background
+#   completion_menu_border  popup border
+completion_menu        = 231
+completion_menu_detail = 245
+completion_menu_source = 45
+completion_menu_select = 237
+completion_menu_bg     = 236
+completion_menu_border = 45
+
+# Brightness for the two blocks (on/off).
+search_bold    = off
+selection_bold = off

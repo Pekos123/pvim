@@ -1,0 +1,23 @@
+# C / C++ syntax rules for pvim.
+#
+# Loaded from ./syntax/ (bundled), then $XDG_CONFIG_HOME/pvim/syntax or
+# ~/.config/pvim/syntax, then $PVIM_SYNTAX_DIR. Files sharing a `filetype`
+# replace the earlier one, so a user file can override this one.
+
+filetype = c
+
+ext = .c .h .cpp .hpp .cc .cxx .hxx
+
+single_comment = //
+multi_comment_start = /*
+multi_comment_end = */
+
+flags = numbers strings
+
+# Control-flow / declaration keywords (yellow).
+keywords = switch if while for break continue return else
+keywords = struct union typedef static enum class case
+
+# Type keywords (green). Each token gets a '|' suffix internally, which the
+# scanner understands as "colour like a type".
+types = int long double float char unsigned signed void short bool size_t

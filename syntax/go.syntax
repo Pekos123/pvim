@@ -1,0 +1,20 @@
+# Go syntax rules for pvim.
+
+filetype = go
+
+ext = .go
+
+single_comment = //
+multi_comment_start = /*
+multi_comment_end = */
+
+flags = numbers strings
+
+# Control-flow / declaration keywords.
+keywords = break case chan const continue default defer else fallthrough for func
+keywords = go goto if import in interface map package range return select struct
+keywords = switch type var
+
+# Primitive types (go/types-like built-ins).
+types = bool byte complex64 complex128 error float32 float64 int int8 int16 int32
+types = int64 rune string uint uint8 uint16 uint32 uint64 uintptr

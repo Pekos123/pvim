@@ -1,0 +1,20 @@
+# JavaScript / TypeScript syntax rules for pvim.
+
+filetype = javascript
+
+ext = .js .mjs .jsx .ts
+
+# Match shebangs that mention "node".
+shebang = node
+
+single_comment = //
+multi_comment_start = /*
+multi_comment_end = */
+
+flags = numbers strings
+
+keywords = break case catch class const continue debugger default delete do else
+keywords = export extends finally for function if import in instanceof new return
+keywords = super switch this throw try typeof var void while with yield let async await
+
+types = int string number boolean object undefined null bigint symbol array function
