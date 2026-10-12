@@ -180,15 +180,38 @@ int terminal_read_key(void) {
     long num = 0;
     for (int j = 0; j < num_end; j++)
         num = num * 10 + (seq[j] - '0');
-    /* Skip an optional ";modifiers" parameter (ignored for these keys). */
+    /* Read the optional ";modifiers" parameter. Arrow keys need it: Ctrl+arrow
+     * ("CSI 1;5C") must be told apart from a bare arrow, while the other keys
+     * ignore it. Modifier values follow xterm/kitty: 2 = Shift, 3 = Alt,
+     * 5 = Ctrl, ... */
+    long mods = 0;
     if (i < len - 1 && seq[i] == ';') {
         i++;
+        long m = 0;
+        int have = 0;
+        while (i < len - 1 && seq[i] >= '0' && seq[i] <= '9') {
+            m = m * 10 + (seq[i] - '0');
+            i++;
+            have = 1;
+        }
+        mods = have ? m : 0;
         while (i < len - 1 && ((seq[i] >= '0' && seq[i] <= '9') || seq[i] == ':'))
             i++;
     }
 
     if (final == '~') {
         if (num_end > 0) {
+            int bits = (mods > 0)
+                ? (int)((mods - 1) & (KEY_MOD_SHIFT | KEY_MOD_ALT |
+                                      KEY_MOD_CTRL | KEY_MOD_SUPER))
+                : 0;
+            /* Shift/Alt+PageUp/PageDown are reported as combos so they can be
+             * matched (built-in motion or a binding); every other "~" key
+             * keeps its unmodified meaning. */
+            int pbits = bits & (KEY_MOD_SHIFT | KEY_MOD_ALT | KEY_MOD_SUPER);
+            if ((num == 5 || num == 6) && pbits)
+                return terminal_combo(pbits,
+                                      (num == 5) ? PAGE_UP : PAGE_DOWN);
             switch ((int)num) {
                 case 1: case 7: return HOME_KEY;
                 case 3: return DEL_KEY;
@@ -210,11 +233,31 @@ int terminal_read_key(void) {
     /* F1-F4 arrive as the SS3 forms ESC O P / Q / R / S. */
     if (!is_csi && num_end == 0 && final >= 'P' && final <= 'S')
         return KEY_F1 + (final - 'P');
+    if (final >= 'A' && final <= 'D') {
+        long m = mods;
+        /* Some terminals (e.g. rxvt) omit the ";1" prefix and send "CSI 5 C"
+         * for Ctrl+Right; a lone parameter in 2..8 is the modifier there. */
+        if (m == 0 && num_end > 0 && num >= 2 && num <= 8)
+            m = num;
+        int arrow = (final == 'A') ? ARROW_UP :
+                    (final == 'B') ? ARROW_DOWN :
+                    (final == 'C') ? ARROW_RIGHT : ARROW_LEFT;
+        int bits = (m > 0)
+            ? (int)((m - 1) & (KEY_MOD_SHIFT | KEY_MOD_ALT |
+                               KEY_MOD_CTRL | KEY_MOD_SUPER))
+            : 0;
+        /* Report modified arrows as combos so the built-in word/page motions
+         * and [bindings] maps can match them. Ctrl+Shift folds onto plain Ctrl
+         * to keep the built-in Ctrl motions unambiguous; an unbound Alt/Super
+         * arrow is turned back into a one-cell move in editor.c. */
+        if (bits & KEY_MOD_CTRL)
+            return terminal_combo(KEY_MOD_CTRL, arrow);
+        if (bits & (KEY_MOD_SHIFT | KEY_MOD_ALT | KEY_MOD_SUPER))
+            return terminal_combo(bits & (KEY_MOD_SHIFT | KEY_MOD_ALT |
+                                          KEY_MOD_SUPER), arrow);
+        return arrow;
+    }
     switch (final) {
-        case 'A': return ARROW_UP;
-        case 'B': return ARROW_DOWN;
-        case 'C': return ARROW_RIGHT;
-        case 'D': return ARROW_LEFT;
         case 'H': return HOME_KEY;
         case 'F': return END_KEY;
     }

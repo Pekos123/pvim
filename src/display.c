@@ -206,22 +206,13 @@ static void display_search_overlay(EditorState *state, const erow *row,
     if (end <= start) return;
     int n = end - start;
     memset(out, 0, (size_t)n);
-    const char *needle = (state->mode == MODE_SEARCH)
-        ? state->search_buf : state->active_search;
+    const char *needle = editor_search_needle(state);
     int nlen = (int)strlen(needle);
     if (nlen == 0) return;
     int scan = start - nlen + 1;
     if (scan < 0) scan = 0;
     for (int p = scan; p + nlen <= end && p + nlen <= row->rsize; p++) {
-        int eq = 1;
-        for (int k = 0; k < nlen; k++) {
-            if (tolower((unsigned char)row->render[p + k]) !=
-                tolower((unsigned char)needle[k])) {
-                eq = 0;
-                break;
-            }
-        }
-        if (eq) {
+        if (editor_search_match_at(row, p, needle, nlen)) {
             for (int k = p; k < p + nlen; k++)
                 if (k >= start) out[k - start] = 1;
         }
@@ -280,17 +271,42 @@ static void display_append_row(abuf *ab, EditorState *state, int file_row) {
     int end = row->rsize;
     if (end > start + screen_cols) end = start + screen_cols;
     int n = end - start;
-    if (n > 0) {
-        unsigned char colhl[4096];
-        unsigned char match[4096];
-        if ((size_t)n > sizeof(colhl)) n = (int)sizeof(colhl);
-        display_build_color_map(row, start, end, colhl);
-        display_search_overlay(state, row, start, end, match);
 
-        /* Selection range in render columns (exclusive end). */
-        int sel_start = 0;
-        int sel_end = -1;
-        if (state->mode == MODE_VISUAL) {
+    /* Selection range in render columns (exclusive end) for this row, plus
+     * which shape is active. `sel_end <= sel_start` means nothing is selected
+     * on this row. */
+    int sel_start = 0;
+    int sel_end = -1;
+    int line_sel = 0;
+    int block_sel = 0;
+    int newline_sel = 0;   /* char-wise: the row's newline is selected */
+    if (state->mode == MODE_VISUAL) {
+        if (state->visual_type == VISUAL_LINE) {
+            /* Whole rows between the anchor and the cursor. */
+            int r0 = state->v_start_y, r1 = state->cy;
+            if (r0 > r1) { int t = r0; r0 = r1; r1 = t; }
+            if (file_row >= r0 && file_row <= r1) {
+                line_sel = 1;
+                sel_start = 0;
+                sel_end = row->rsize;
+            }
+        } else if (state->visual_type == VISUAL_BLOCK) {
+            /* Rectangular block: the screen columns between the anchor
+             * and the cursor, on every row of the range. */
+            int r0 = state->v_start_y, r1 = state->cy;
+            if (r0 > r1) { int t = r0; r0 = r1; r1 = t; }
+            if (file_row >= r0 && file_row <= r1) {
+                int arx = 0;
+                if (state->v_start_y >= 0 &&
+                    state->v_start_y < state->buffer.num_rows)
+                    arx = buffer_row_cx_to_rx(
+                        &state->buffer.rows[state->v_start_y], state->v_start_x);
+                int crx = state->rx;
+                block_sel = 1;
+                sel_start = (arx < crx) ? arx : crx;
+                sel_end = ((arx > crx) ? arx : crx) + 1;
+            }
+        } else {
             int sy, sx, ey, ex;
             editor_get_selection(state, &sy, &sx, &ey, &ex);
             if (file_row >= sy && file_row <= ey) {
@@ -301,13 +317,27 @@ static void display_append_row(abuf *ab, EditorState *state, int file_row) {
                 if (endc < startc) endc = startc;
                 sel_start = buffer_row_cx_to_rx(row, startc);
                 sel_end = buffer_row_cx_to_rx(row, endc);
+                /* Char-wise selection also covers the newline of every row it
+                 * runs past, and of an empty end row (whose only cell is its
+                 * newline). That is how a blank line becomes visible in `v`. */
+                if (file_row < ey || (file_row == ey && ex == -1))
+                    newline_sel = 1;
             }
         }
+    }
 
-        int sel_col = highlight_to_color(HL_SELECTION);
-        int srch_col = highlight_to_color(HL_MATCH);
-        int sel_bold = highlight_selection_bold();
-        int srch_bold = highlight_search_bold();
+    int sel_col = highlight_to_color(HL_SELECTION);
+    int srch_col = highlight_to_color(HL_MATCH);
+    int sel_bold = highlight_selection_bold();
+    int srch_bold = highlight_search_bold();
+    int used = 0;   /* text-area columns painted on this row */
+
+    if (n > 0) {
+        unsigned char colhl[4096];
+        unsigned char match[4096];
+        if ((size_t)n > sizeof(colhl)) n = (int)sizeof(colhl);
+        display_build_color_map(row, start, end, colhl);
+        display_search_overlay(state, row, start, end, match);
 
         int prev_color = -1;
         int prev_mark = 0;
@@ -340,7 +370,53 @@ static void display_append_row(abuf *ab, EditorState *state, int file_row) {
         }
         if (prev_color != -1 || prev_mark || prev_bold)
             ab_puts(ab, "\x1b[0m");
+        used = n;
     }
+
+    /* Line-wise selection paints a full-width band. A blank or short line has
+     * no characters to reverse-video, so fill the rest of the text area with
+     * selected spaces; the selection stays clearly visible. */
+    if (line_sel) {
+        int pad = screen_cols - used;
+        if (pad > 0) {
+            ab_set_attrs(ab, sel_col, 1, sel_bold);
+            for (int i = 0; i < pad; i++) ab_append(ab, " ", 1);
+            ab_puts(ab, "\x1b[0m");
+            used = screen_cols;
+        }
+    }
+
+    /* Block-wise selection keeps its rectangle on short/blank rows by drawing
+     * the missing columns as selected (virtual) spaces. */
+    if (block_sel && sel_end > sel_start) {
+        int from = sel_start - start;
+        if (from < used) from = used;
+        if (from < 0) from = 0;
+        int to = sel_end - start;
+        if (to > screen_cols) to = screen_cols;
+        if (from < to) {
+            for (int c = used; c < from; c++) ab_append(ab, " ", 1);
+            ab_set_attrs(ab, sel_col, 1, sel_bold);
+            for (int c = from; c < to; c++) ab_append(ab, " ", 1);
+            ab_puts(ab, "\x1b[0m");
+            used = to;
+        }
+    }
+
+    /* Character-wise selection has no band; it marks the newline cell, the
+     * selection's line break, one column past the text. A blank line has no
+     * characters at all, so that cell (at column 0) is what makes it visible. */
+    if (newline_sel) {
+        int screen_col = row->rsize - start;    /* newline position on screen */
+        if (screen_col >= used && screen_col < screen_cols) {
+            for (int c = used; c < screen_col; c++) ab_append(ab, " ", 1);
+            ab_set_attrs(ab, sel_col, 1, sel_bold);
+            ab_append(ab, " ", 1);
+            ab_puts(ab, "\x1b[0m");
+            used = screen_col + 1;
+        }
+    }
+
     /* Append the diagnostic message inline at the end of the code text, after
      * one column of padding, coloured by severity and cropped so the whole row
      * still fits the text area (overflow would make the terminal wrap and
@@ -348,7 +424,7 @@ static void display_append_row(abuf *ab, EditorState *state, int file_row) {
      * part of the buffer, so it cannot be edited. */
     if (state->lsp_diags) {
         const LspDiag *d = lsp_first_diag_on_line(state->lsp_diags, file_row);
-        int room = screen_cols - (n > 0 ? n : 0) - 1; /* leave 1 col padding */
+        int room = screen_cols - used - 1; /* leave 1 col padding */
         if (d && d->message[0] && room >= 4) {
             const char *label = "Hint";
             switch (d->severity) {
@@ -394,7 +470,12 @@ void display_refresh_screen(EditorState *state) {
     size_t status_start = ab.len;
     const char *mode_name = "NORMAL";
     if (state->mode == MODE_INSERT) mode_name = "INSERT";
-    else if (state->mode == MODE_VISUAL) mode_name = "VISUAL";
+    else if (state->mode == MODE_BLOCK_INSERT) mode_name = "V-BLOCK-INSERT";
+    else if (state->mode == MODE_VISUAL) {
+        if (state->visual_type == VISUAL_LINE) mode_name = "V-LINE";
+        else if (state->visual_type == VISUAL_BLOCK) mode_name = "V-BLOCK";
+        else mode_name = "VISUAL";
+    }
     else if (state->mode == MODE_COMMAND) mode_name = "COMMAND";
     else if (state->mode == MODE_SEARCH) mode_name = "SEARCH";
     else if (state->mode == MODE_EXPLORER) mode_name = "EXPLORER";
@@ -425,7 +506,8 @@ void display_refresh_screen(EditorState *state) {
     ab_printf(&ab, " | Ln: %s",
               state->line_numbers == LN_RELATIVE ? "rel" :
               state->line_numbers == LN_OFF     ? "off" : "abs");
-    if (state->mode != MODE_SEARCH && state->active_search[0] != '\0') {
+    if (state->mode != MODE_SEARCH && state->search_highlight_on &&
+        state->active_search[0] != '\0') {
         ab_puts(&ab, " | /");
         ab_puts_c(&ab, state->active_search);
     }

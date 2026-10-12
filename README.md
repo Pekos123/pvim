@@ -52,8 +52,16 @@ The build uses clang with strict C99 flags (`-Wall -Wextra -Wpedantic
 
 Editing is vim-flavoured: `i` insert, `Esc` back to normal mode, `d` + motion
 to delete, `yy` to yank the current line, `p` to paste it below, `:` for
-`w`/`q`/`x` commands, `u`/`Ctrl-r` undo/redo. In visual mode `y` yanks the
-selection and `p` pastes the register over it. `:diag` (also `:problems` /
+`w`/`q`/`x` commands, `u`/`Ctrl-r` undo/redo. `Ctrl-Left`/`Ctrl-Right` (or
+`Shift-Left`/`Shift-Right`) move by word — a keyword run or a punctuation run,
+flowing across line breaks — `Ctrl-Up`/`Ctrl-Down` jump to the previous/next
+paragraph boundary (an empty line), and `Shift-Up`/`Shift-Down` (or
+`PageUp`/`PageDown`) move a full page; all of them work in normal, insert and
+visual mode. `v`/`V`/`Ctrl-v` start
+character-, line- and block-wise visual selection; `y` yanks the selection and
+`p` pastes the register over it, and in a block selection `I` inserts text on
+every selected line (see [Visual block insert](#visual-block-insert)). `:diag`
+(also `:problems` /
 `:errors`) opens a floating panel listing every diagnostic in the file (see
 [Floating windows](#floating-windows-popups)); `-` opens the floating file
 explorer (see [File explorer](#file-explorer)). Completions from clangd, the
@@ -61,9 +69,14 @@ buffer and on-disk headers (inside an `#include`) pop up while you type (see
 [Autocomplete](#autocomplete)).
 
 Search with `/`: type a word or phrase (shown in the status bar, matches are
-highlighted live as you type, drawn as reverse-video blocks). `Enter` keeps the
-highlight until you run `:noh` (also `:nohlsearch`); `Esc` cancels the current
-search and restores the previous one. The block colour and brightness come from
+highlighted live as you type, drawn as reverse-video blocks). `Enter` jumps to
+the first match at/after the cursor and keeps the highlight until you run `:noh`
+(also `:nohlsearch`); `Esc` cancels the current search and restores the previous
+one. Step between matches with **`Alt+Right`** / **`Alt+Left`**, or the
+`searchnext` / `searchprev` commands (also `snext`/`sprev`, `findnext`/
+`findprev`) — rebindable per key in `[bindings]`. Both directions wrap around the
+buffer, and `:noh` only clears the highlight: the pattern is kept, so navigation
+still works afterwards. The block colour and brightness come from
 `search`/`search_bold` (see [Colours](#colours-themes)).
 
 Copy and paste talk to the system clipboard: **`Super+y`** / **`Super+p`** by
@@ -214,6 +227,53 @@ The clipboard itself is reached through the usual helpers — `wl-copy`/`wl-past
 falls back to the terminal's **OSC 52** escape when no helper is installed, so
 it keeps working over SSH.
 
+## Visual block insert
+
+In a block selection (`Ctrl-v`), press **`I`** to insert text on **every** line
+of the block at its left column. You type on the first line as usual (the status
+bar shows `-- VISUAL BLOCK INSERT --`); press `Esc` and the typed text is replayed
+on all the other selected lines at the same column.
+
+- `Backspace` edits the run before it is applied, and `Tab` inserts four spaces,
+  just like insert mode.
+- Lines shorter than the target column are padded with spaces so the inserted
+  text lines up.
+- The whole operation — typing plus the multi-line application — is a **single
+  undo step**, so one `u` removes it everywhere.
+- `I` outside a block selection does nothing.
+
+## Word, paragraph and page motions
+
+The arrow keys move the cursor one cell at a time. **Ctrl** and **Shift** add
+word-wise and page-wise navigation, in normal, insert and visual mode alike:
+
+| Key                       | Action                                                    |
+|---------------------------|-----------------------------------------------------------|
+| `Ctrl-Right` / `Shift-Right` | forward to the start of the next word                  |
+| `Ctrl-Left` / `Shift-Left`   | back to the start of the previous word                 |
+| `Ctrl-Down`               | down to the next paragraph boundary (the next empty line) |
+| `Ctrl-Up`                 | up to the previous paragraph boundary                     |
+| `Shift-Down` / `PageDown` | scroll down and move the cursor a full page               |
+| `Shift-Up` / `PageUp`     | scroll up and move the cursor a full page                 |
+
+A *word* follows vim's token logic: a run of keyword characters (`[A-Za-z0-9_]`)
+or a run of punctuation, with whitespace skipped between. Moving forward at the
+end of a line continues at the first word of the next line, and vice versa, so
+the motions flow across the whole buffer. The paragraph jumps are vim's `{` /
+`}`, landing in column 0 on the next/previous empty line. A *page* is the height
+of the text viewport; the cursor moves by that many lines (clamped to the first
+and last line of the file) and the window scrolls to keep it visible, so the
+cursor never leaves the viewport. In a visual selection all of these simply
+grow or shrink the highlight.
+
+The sequences are decoded for standard terminals and for the kitty keyboard
+protocol (`CSI 1;2C`, `CSI 1;5C`, `CSI 1;3C`, `CSI 6;3~`, …), plus the bare
+`CSI 5C` form some terminals (rxvt) send. Modified arrows are reported as
+distinct keys, so the table above is only the default layout — they can be
+remapped (see [Key bindings](#key-bindings)), for example onto **Alt** when
+your terminal already uses Shift. Note that Alt+Left/Alt+Right are the built-in
+search next/previous keys; any *other* unbound Alt+arrow still moves one cell.
+
 ## Autocomplete
 
 While typing, pvim offers completions from a few sources: **clangd** (when it
@@ -280,6 +340,15 @@ map <F2> :diag
 map g :wq
 ```
 
+pvim reads the first `pvim.conf` it finds, in this order: `$PVIM_CONFIG`, then
+`${XDG_CONFIG_HOME:-~/.config}/pvim/pvim.conf`, then `./pvim.conf`, then next to
+the executable and one level above it — so a `~/.config` copy takes precedence
+over one in the working directory. Because maps are consulted **before** the
+built-in keys, a map shadows a default. In particular, a config copied from the
+older word-motion example (which bound `<A-Right>`/`<A-Left>`) masks the
+built-in search next/previous keys; remove those lines or move the word motions
+to another combo (e.g. `<A-S-Right>`/`<A-S-Left>`) and run `:reload`.
+
 The `[bindings]` header is **required**: a `map` line anywhere else in the
 file is ignored (that keeps the strict flat `key = value` parsing intact). The
 section may be empty, and every line under it maps a key to a command; the `:`,
@@ -299,7 +368,7 @@ The key is written in standard vim notation:
 | `<D-x>`         | Super (Windows/Command), as a kitty `CSI …;9u` combo    |
 | `<F1>`–`<F12>`  | Function keys (SS3 + `CSI n~` + kitty functional codes) |
 | `<CR>`/`<Enter>`,`<Esc>`,`<Tab>`,`<BS>`,`<Space>` | named keys |
-| `<Up>`/`<Down>`/`<Left>`/`<Right>`, `<Home>`, `<End>`, `<Del>`, `<PageUp>`, `<PageDown>` | navigation |
+| `<Up>`/`<Down>`/`<Left>`/`<Right>`, `<Home>`, `<End>`, `<Del>`, `<PageUp>`, `<PageDown>` | navigation, combinable with Ctrl/Shift/Alt/Super (`<S-Down>`, `<A-Up>`, `<C-S-Right>`, …) |
 | `g` and any other single character | bare keys, bindable as-is    |
 
 Bindings fire in **normal and visual modes only**; typing, `:`-commands and
@@ -307,10 +376,33 @@ search are never intercepted, and a plain key keeps its literal meaning in
 insert mode. Bindings are consulted before the built-in commands and the
 clipboard shortcuts, so `map <D-y> :w` rebinds copy, and `map w :q!` shadows
 the (otherwise unbound) `w` key in normal mode. Visual mode drops to normal
-before the command runs.
+before the command runs — except for the motion commands below, which keep the
+mode so a bound key extends the selection.
 
 Commands are the same set `:` mode accepts: `w`/`wq`/`x` (optionally with a
-file argument), `q`/`q!`, `noh`, `diag`, `close`, `explore`, and `reload`.
+file argument), `q`/`q!`, `noh`, `diag`, `close`, `explore`, `reload`, and the
+search motions `searchnext`/`searchprev` (also `snext`/`sprev`,
+`findnext`/`findprev`). The
+[word / paragraph / page motions](#word-paragraph-and-page-motions) are
+commands too — `wordleft`/`wordprev`, `wordright`/`wordnext`,
+`parup`/`parprev`, `pardown`/`parnext`, `pageup`/`pgup`, `pagedown`/`pgdn` — so
+they can be rebound to any key that parses. Alt+Left/Alt+Right are the built-in
+search navigation keys, so move the word motions to a free combo:
+
+```ini
+[bindings]
+map <A-Down>    :pagedown
+map <A-Up>      :pageup
+map <A-S-Right> :wordright
+map <A-S-Left>  :wordleft
+```
+
+Rebinding `searchnext`/`searchprev` works the same way, e.g. onto `n`/`N`:
+
+```ini
+map n :searchnext
+map N :searchprev
+```
 
 `:q` refuses to throw away unsaved work: when the buffer has been modified it
 is rejected with *No write since last change (add ! to override)*. `:q!` is the

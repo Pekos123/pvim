@@ -17,6 +17,7 @@ static char *trim_ws(char *s) {
     return s;
 }
 
+
 static char *aprintf(const char *fmt, ...) {
     va_list ap, ap2;
     va_start(ap, fmt);

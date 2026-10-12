@@ -91,6 +91,82 @@
   clipboard. Both go through `editor_paste` / `editor_clipboard_paste`.
 - `dd` yanks + deletes (unchanged); the register round-trips whole lines.
 
+## Visual selection modes (`v` / `V` / Ctrl-V)
+- `EditorState.visual_type` (`VISUAL_CHAR` / `VISUAL_LINE` / `VISUAL_BLOCK`,
+  see `include/editor.h`) picks the granularity. Normal mode `v` starts
+  character-wise, `V` (Shift+v, matched as the plain `V` byte or kitty's
+  `KEY_MOD_SHIFT`+`v` combo) line-wise, Ctrl-V block-wise. Inside visual mode
+  the three keys switch granularity, and pressing the active one again leaves
+  visual mode. The status line/message shows `-- VISUAL [LINE|BLOCK] --` and the
+  mode name is `VISUAL` / `V-LINE` / `V-BLOCK`.
+- The anchor stays in `v_start_x`/`v_start_y`; `editor_visual_rows` normalizes
+  the row range and `editor_block_cols` the render-column range (screen columns,
+  so tabs line up). `editor_rx_to_cx` maps a column back to a character index
+  per row.
+- `editor_selection_to_string` (yank / clipboard copy) and `editor_visual_delete`
+  branch on `visual_type`: line-wise takes whole rows (newline-terminated),
+  block-wise takes the rectangle on each row (newline-separated). The yank
+  register carries the shape in `state->yank_type`, and `editor_paste` uses
+  `editor_insert_block` for a block register so the columns paste at the cursor
+  on consecutive rows.
+- `display.c` highlights line-wise selections to the end of each row and
+  block-wise selections as a screen-column rectangle.
+- `display_append_row` paints a line-wise selection as a **full-width band**
+  across the text area, filling the tail with `HL_SELECTION` spaces, and pads a
+  block-wise selection with virtual selected spaces out to the block's end
+  column. This is what makes an **empty** (or short) selected line visible: it
+  has no characters to reverse-video, so without the padding its selection was
+  invisible even though delete/yank still acted on it. A row filled by the band
+  suppresses the inline diagnostic (`room` is derived from the columns `used`).
+- Character-wise (`v`) keeps its precise cells but additionally marks the
+  **newline** cell (one column past the text) whenever the newline is part of
+  the selection: rows before the end row, plus an empty end row (whose only cell
+  is its newline). That single `HL_SELECTION` cell is what makes a blank line
+  visible in `v`, matching the line/block bands.
+- Block insert (`I` in Visual Block) is its own `MODE_BLOCK_INSERT` (see
+  `include/editor.h`): the text is typed live on the first row of the block at
+  the block's **left** render column (`editor_block_cols` low edge) and, on
+  `<Esc>`, replayed on `bi_r0+1..bi_r1` through `block_insert_index`, which pads
+  short rows out to the column with spaces (Vim behavior). The session lives in
+  `bi_r0`/`bi_r1`/`bi_col`/`bi_cx`/`bi_padded` and the replay run `bi_text`/
+  `bi_len`; backspace pops the run. `editor_begin_change` fires on the first
+  keystroke and `editor_end_change` on `<Esc>`, so typing *and* the multi-row
+  application are one atomic undo step (nothing typed ⇒ no undo entry). Tab
+  inserts `PVIM_TAB_STOP` spaces, matching INSERT mode. The status message is
+  `-- VISUAL BLOCK INSERT --` and the mode name is `V-BLOCK-INSERT`. `I` outside
+  Visual Block is a no-op.
+
+## Modified navigation (Ctrl/Shift+arrow, Page keys)
+- `src/terminal.c` now **keeps** the `;modifiers` parameter of a legacy CSI
+  sequence instead of discarding it (`CSI 1;5C`). For finals `A`–`D` a set Ctrl
+  bit returns `terminal_combo(KEY_MOD_CTRL, ARROW_*)` (extra modifiers fold onto
+  plain Ctrl so the built-in Ctrl motions stay unambiguous) and any other
+  Shift/Alt/Super bit returns `terminal_combo(bits, ARROW_*)`; only a bare arrow
+  stays a single-cell move. The bare `CSI 5C` form some terminals (rxvt) send is
+  read the same way. In the `~` branch Shift/Alt/Super+`5~`/`6~` (PageUp/PageDown)
+  are reported as `terminal_combo(bits, PAGE_*)` (other `~` keys ignore the
+  modifier). Kitty uses the same `CSI 1;mods A/B/C/D` and `CSI 5/6;mods ~` forms —
+  there are no `u`-code arrows (the `u` range starts at `57358`), so the `CSI u`
+  branch is untouched. An Alt+arrow/page that no binding claims is turned back
+  into the bare key by `editor_alt_nav_fallback`, preserving the old one-cell /
+  plain-page behavior.
+- `src/editor.c` adds `word_class` (blank / keyword / punctuation), a
+  line-crossing stream view (`word_stream_char`, `word_step_fwd/back`),
+  `editor_move_word` (Vim `w`/`b`: skip the current run, skip whitespace, land on
+  the next word start; symmetric backwards), `editor_move_paragraph` (Vim
+  `{`/`}`: next/previous empty line, column 0), and `editor_page_motion`
+  (`cy ±= screen_rows`, clamped to `[0, num_rows-1]`, column kept; `editor_scroll`
+  then follows the cursor so it stays inside the viewport).
+- `editor_handle_modified_nav` recognizes the keys and is dispatched once in
+  `editor_process_keypress`, after the clipboard shortcuts and **before** the
+  per-mode `switch`, so NORMAL, VISUAL and INSERT behave identically (a visual
+  selection just extends/contracts). Word = Ctrl/Shift+Left/Right; paragraph =
+  Ctrl+Up/Down; page = Shift+Up/Down, `PageUp`/`PageDown` and Shift+PageUp/Down
+  (bindings still win because they are dispatched first). In NORMAL it clears
+  `pending_op`; in INSERT it closes an open completion menu so its anchor can't
+  drift. Non-editing modes (COMMAND/SEARCH/EXPLORER) ignore it. Normal/visual
+  motions never rest on the virtual one-past-the-end column; INSERT may.
+
 ## Key bindings (`[bindings]` in pvim.conf)
 - `src/config.c` gains `pvim_config_section("bindings", lines, max)`, a
   section-aware reader returning the trimmed, non-comment lines inside a
@@ -102,12 +178,22 @@
 - `editor_run_cmd(state, cmdline)` is the single command executor: both the
   `MODE_COMMAND` Enter handler and every binding dispatch call it, so a bound
   key and `:cmd` mean exactly the same thing.
+- The word/page motions are commands too (`pageup`/`pgup`, `pagedown`/`pgdn`,
+  `wordleft`/`wordprev`, `wordright`/`wordnext`, `parup`/`parprev`,
+  `pardown`/`parnext`), as are the search motions (`searchnext`/`snext`/
+  `findnext`, `searchprev`/`sprev`/`findprev`), so they can be rebound to any
+  parsable key. The binding
+  dispatcher calls `editor_cmd_is_motion()` first and keeps the current mode for
+  them, so a bound key in VISUAL extends the selection instead of dropping to
+  NORMAL like a normal `:command`.
 - `include/editor.h` adds `Binding` (`key`, `cmd[128]`) and `bindings` /
   `binding_count` on `EditorState`, loaded by `bindings_load()` in `editor_init`
   and freed in `editor_free`.
 - Key encoding mirrors `clipboard_key()`: Ctrl+letter -> legacy control byte,
   unmodified key -> its plain byte, alt/super combos -> `terminal_combo` value.
-  `<S-p>` collapses onto the uppercase byte `P`.
+  `<S-p>` collapses onto the uppercase byte `P`; Shift is **kept** on the nav
+  keys (`is_nav_key`) so `<S-Down>` / `<A-Up>` / `<C-S-Right>` bind distinctly
+  (`<S-Tab>` still collapses to `<Tab>`).
 - Dispatch is at the top of `editor_process_keypress`, before the clipboard
   shortcuts (so `map <D-y> ...` can rebind copy/paste), and fires only in
   MODE_NORMAL / MODE_VISUAL — COMMAND, SEARCH and INSERT are never intercepted.
@@ -123,6 +209,42 @@
   block is ignored (the flat `key = value` parser stays untouched). The bundled
   `pvim.conf` ships an explicit `[bindings]` header so copy-pasted examples
   can't silently miss it.
+- `pvim_config_path()` (`src/config.c`) resolves the first existing file in this
+  order: `$PVIM_CONFIG`, `~/.config/pvim/pvim.conf`, `./pvim.conf`, the
+  executable's directory, its parent. A `~/.config` copy therefore **overrides**
+  a repo-local `./pvim.conf`, and because maps are dispatched before the built-in
+  keys a stale map there shadows a default (a config copied from the old
+  `<A-Right>`/`<A-Left>` word-motion example masks the search navigation keys —
+  the bundled example now uses `<A-S-Right>`/`<A-S-Left>` instead).
+
+## Search navigation (next / previous match)
+- One matcher, two callers: `editor_search_needle()` returns the pattern the
+  renderer draws (the in-progress `search_buf` in SEARCH mode, else the confirmed
+  `active_search` while `search_highlight_on`, else `""`) and
+  `editor_search_match_at(row, rx, needle, nlen)` is the case-insensitive literal
+  test over `row->render`. `display_search_overlay` and the navigation both go
+  through them, so the highlight and `n`/`N` can never disagree. Matching is on
+  the tab-expanded `render` text, so a match can span tabs/visually-adjacent
+  text; the column is mapped back with `editor_rx_to_cx()`.
+- `editor_search_jump(state, dir)` (static) scans whole rows from `(cy, cx)`,
+  wraps around the buffer, moves the cursor to the match start via `search_goto`,
+  and sets the status: `Search: %s`, `Search wrapped to '%s'` or
+  `Pattern not found: %s`. With no confirmed pattern it says
+  `No previous search`. `inclusive` lets a match at/covering the cursor column
+  count — `search_find(..., 1, ...)` is only used when confirming a search, so
+  `/x<Enter>` lands on the match under the cursor; the motions use `inclusive=0`
+  so the match the cursor sits in is not offered again.
+- Default keys: `editor_handle_search_nav` maps **Alt+Right / Alt+Left** to the
+  `searchnext` / `searchprev` commands in NORMAL and VISUAL only. It runs after
+  the `[bindings]` loop (a user map wins) and **before** `editor_alt_nav_fallback`,
+  which would otherwise turn the combo into a one-cell move. In VISUAL the cursor
+  moves and the anchor stays, so the selection grows.
+- Confirming a search (`/pat<Enter>`) sets `active_search`, turns on
+  `search_highlight_on`, leaves SEARCH mode and jumps to the first match
+  at/after the cursor. `:noh` now clears `search_highlight_on` only — the
+  pattern stays, so navigation keeps working (Vim's `n`/`N` after `:noh`). The
+  status bar shows `/pattern` only while the highlight is on.
+- `include/editor.h` adds `search_highlight_on` and the two matcher prototypes.
 
 ## Autocomplete (clangd + buffer words + headers)
 - Sources: clangd results first (when it is running for the file), then unique
@@ -177,7 +299,14 @@
   label of `" malloc"` becomes `"malloc"`).
 - UI: the popup in `window.c` is anchored below the cursor, with a 10-row
   viewport and scroll; the snapshot (`state->completion_items`) is owned by the
-  editor and freed in `editor_free`. Each row is two aligned columns: the clean
+  editor and freed in `editor_free`. `editor_completion_draw` stores the visible
+  page at rows `0..shown-1` (page-relative) and leaves `win->scroll = 0`, with
+  `win->selected` the page-relative index — the same convention as the diag
+  panel and the explorer. The renderer adds `win->scroll` when indexing the
+  stored lines, so setting it while already storing a page offsets the list
+  twice (wrong items and blank rows at the bottom) once the candidates exceed
+  the viewport; `e2e_completion_menu.py` guards this with a 15-item scroll phase.
+  Each row is two aligned columns: the clean
   label on the left and, right-aligned, the signature (return type + name +
   parameter list for functions), the kind tag and a source badge (`[LSP]`,
   `[Snip]`, `[Hdr]`, `[Buffer]`). `editor_completion_draw` computes the widths, builds the
@@ -217,6 +346,33 @@
   - `e2e_diag_panel.py` — `:diag` lists diagnostics.
   - `e2e_yank_paste.py` — `yy` yanks a line, `p` pastes below, visual `p`
     replaces the selection.
+  - `e2e_visual_block_line.py` — line-wise (`V`) and block-wise (Ctrl-V) visual
+    selection: whole rows vs. a screen-column rectangle, spanning tabs; `d`
+    deletes, `y`+`p` round-trips the shape, granularity switching and exiting,
+    and an empty buffer doesn't fault. It also checks the reverse-video band on
+    a **blank** selected line (full-width for `V`, the block's width for
+    Ctrl-V) and the single **newline** cell for character-wise `v`, by scanning
+    the raw byte stream for a reverse-video SGR on a row whose visible text is
+    blank.
+  - `e2e_visual_block_insert.py` — Visual Block `I`: the typed text is replayed
+    on every row of the block at the block's left column, short rows are padded
+    with spaces, Tab inserts `PVIM_TAB_STOP` spaces, backspace trims the run,
+    one `u` undoes the whole session, `I` outside Visual Block is a no-op, and
+    the status shows `-- VISUAL BLOCK INSERT --`.
+  - `e2e_word_motion.py` — Ctrl/Shift+arrow motions: forward lands on the
+    punctuation then keyword runs and crosses line breaks, backward returns to
+    the previous word start (cursor observed by typing a `@` marker and saving
+    with `:w`), the same motion works in INSERT and extends a VISUAL selection
+    that `d` then removes, Ctrl+Down/Up hit the next/previous empty line, and
+    `CSI 1;5C` plus the bare rxvt `CSI 5C` decode as Ctrl+Right while Shift+Right
+    moves a word and a plain arrow (or an Alt+arrow the search motions do not
+    claim, e.g. Alt+Down) keeps moving one cell.
+  - `e2e_shift_page.py` — Shift/page viewport motions on a pty pinned to 20 rows
+    (19 text rows) via `TIOCSWINSZ` + `SIGWINCH`: Shift+Down, Shift+PageDown and
+    plain PageDown all move the cursor one full page and the viewport follows,
+    Shift+Up/PageUp return, the cursor clamps at line 0 and at the last line,
+    empty buffers are harmless, a VISUAL LINE `V` + Shift+Down + `d` removes a
+    full page of rows, and the `CSI 1;2A/B` and `CSI 5;2~` forms decode.
   - `e2e_clipboard_visual.py` — `clipboard_mod+p` replaces the selection in
     visual mode (fake `wl-paste` on PATH).
   - `e2e_completion_words.py` — with no server (a `.txt` file), typing a prefix
@@ -230,8 +386,10 @@
     right-aligned and line up across rows, the label / dimmed detail / source
     badge / selected-row block / background / border each use the configured
     `completion_menu*` role, and the selected row's block spans the full content
-    width. An optional clangd phase (skipped when it is missing) checks that a
-    function shows its return type and parameter list in the detail colour.
+    width. A 15-item scroll phase checks the viewport never paints blank rows
+    and shows the right slice after scrolling. An optional clangd phase (skipped
+    when it is missing) checks that a function shows its return type and
+    parameter list in the detail colour.
   - `e2e_completion_include.py` — `#include` completion: with clangd, typing
     inside `#include <...` offers headers and accepting yields
     `#include <stdio.h>`; with no server (a `.txt` file) the local scan backs the
@@ -244,6 +402,22 @@
     super+d (`\x1b[100;9u`) opens the `:diag` panel, a bare `w` map fires in
     NORMAL but never while typing in `:`-mode, malformed map lines are ignored,
     and a `<F2>` map fires on the SS3 sequence (uses a temp `PVIM_CONFIG`).
+  - `e2e_motion_bindings.py` — the word/page motions are remappable commands:
+    `map <A-Down> :pagedown`, `<A-Up>`/`<A-PageUp>`/`<A-PageDown>`, `<A-S-Right>`/
+    `<A-S-Left>` for the word motions and a `<S-Down>` map all fire; an *unbound*
+    Alt+arrow that the search motions do not claim (e.g. Alt+Down) still moves one
+    cell (the parser emits a combo but `editor_alt_nav_fallback` drops the
+    modifier), and a bound motion keeps
+    VISUAL so `V` + `<A-Down>` + `d` deletes a full page (temp `PVIM_CONFIG`,
+    pty pinned to 20 rows).
+  - `e2e_search_nav.py` — search next/previous: `/abc<Enter>` jumps to the first
+    match at/after the cursor, Alt+Right / Alt+Left step forward / backward
+    (including a match inside a longer token), both wrap, `:noh` clears the
+    highlight but navigation still works, `:searchnext`/`:searchprev` do the same
+    as commands, a `map <A-Right> :searchprev` overrides the built-in default, a
+    missing pattern leaves the cursor put, `V` + Alt+Right + `d` deletes the
+    match span line-wise, and an Alt+Right with no prior search is harmless (temp
+    `PVIM_CONFIG`).
   - `e2e_reload.py` — a `map` added to pvim.conf while pvim runs (and
     `linenumbers` / `theme` changes) take effect after `:reload` (uses a temp
     `PVIM_CONFIG` and `PVIM_THEME_DIR`).
