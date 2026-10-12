@@ -87,6 +87,14 @@ static int mod_token(const char *s) {
     return 0;
 }
 
+/* Named non-text keys whose Shift modifier is meaningful and must not be
+ * collapsed away (unlike Shift on a letter). */
+static int is_nav_key(int code) {
+    return (code >= ARROW_LEFT && code <= ARROW_DOWN) ||
+           code == HOME_KEY || code == END_KEY || code == DEL_KEY ||
+           code == PAGE_UP || code == PAGE_DOWN;
+}
+
 /* Parse the key part of a `[bindings]` map line: either a single bare
  * character (`g`) or a vim-style `<...>` spec such as `<C-s>`, `<C-S-p>`,
  * `<F2>`, `<Up>`, `<Space>`, `<D-y>`. Returns the same value
@@ -161,7 +169,9 @@ static int parse_bind_key(const char *name) {
         return CTRL_KEY(code);
     if (mods & KEY_MOD_SHIFT) {
         if (code >= 'a' && code <= 'z') return code - 32; /* <S-p> -> 'P' */
-        mods &= ~KEY_MOD_SHIFT;                           /* <S-Up> -> <Up> */
+        /* Keep Shift on the nav keys so <S-Up> can be bound distinctly; every
+         * other key still collapses it (<S-Tab> -> <Tab>). */
+        if (!is_nav_key(code)) mods &= ~KEY_MOD_SHIFT;
     }
     if (mods == 0) return code;
     return terminal_combo(mods, code);
@@ -326,6 +336,7 @@ void editor_init(EditorState *state) {
     state->search_buf[0] = '\0';
     state->search_len = 0;
     state->active_search[0] = '\0';
+    state->search_highlight_on = 0;
     state->yank_buf = NULL;
     state->yank_len = 0;
     state->pending_op = 0;
@@ -1349,6 +1360,171 @@ static void editor_move_cursor(EditorState *state, int key) {
         state->rx = buffer_row_cx_to_rx(&state->buffer.rows[state->cy], state->cx);
 }
 
+/* Vim-style word class: 0 = blank / line break, 1 = keyword (alnum or '_'),
+ * 2 = anything else (punctuation). Ctrl+arrow word motions use it. */
+static int word_class(int c) {
+    if (c == '\0' || c == ' ' || c == '\t' || c == '\n' || c == '\r') return 0;
+    if (is_ident_char((unsigned char)c)) return 1;
+    return 2;
+}
+
+/* Read the buffer as one stream: a real byte, a line break at the one-past-end
+ * row position (x == size), or '\0' past the last row. */
+static int word_stream_char(const EditorBuffer *buffer, int y, int x) {
+    if (y < 0 || y >= buffer->num_rows || x < 0) return '\0';
+    if (x < buffer->rows[y].size) return (unsigned char)buffer->rows[y].chars[x];
+    if (x == buffer->rows[y].size) return '\n';
+    return '\0';
+}
+
+/* One position backwards in the stream, crossing into the previous row's
+ * one-past-end (line-break) column. No-op at the very start. */
+static void word_step_back(const EditorBuffer *buffer, int *y, int *x) {
+    if (*x > 0) {
+        (*x)--;
+    } else if (*y > 0) {
+        (*y)--;
+        *x = buffer->rows[*y].size;
+    }
+}
+
+/* One position forwards, crossing into the next row. No-op past the buffer. */
+static void word_step_fwd(const EditorBuffer *buffer, int *y, int *x) {
+    if (*y >= buffer->num_rows) return;
+    if (*x < buffer->rows[*y].size) (*x)++;
+    else { (*y)++; *x = 0; }
+}
+
+/* Move to the start of the next word (dir > 0) or the previous word
+ * (dir < 0) using Vim's w/b token logic: a word is a run of keyword chars or
+ * a run of punctuation, and blank runs (including line breaks) are skipped.
+ * At the buffer edges the cursor clamps to a real position. */
+static void editor_move_word(EditorState *state, int dir) {
+    EditorBuffer *b = &state->buffer;
+    if (b->num_rows <= 0) return;
+    int y = state->cy, x = state->cx;
+
+    if (dir > 0) {
+        /* Leave the run the cursor is in, then cross the whitespace gap. */
+        int cl = word_class(word_stream_char(b, y, x));
+        if (cl != 0) {
+            while (word_class(word_stream_char(b, y, x)) == cl)
+                word_step_fwd(b, &y, &x);
+        }
+        while (word_stream_char(b, y, x) != '\0' &&
+               word_class(word_stream_char(b, y, x)) == 0)
+            word_step_fwd(b, &y, &x);
+        if (word_stream_char(b, y, x) == '\0') {
+            /* Past the end: park on the last character. */
+            y = b->num_rows - 1;
+            x = b->rows[y].size;
+            if (x > 0) x--;
+        }
+    } else {
+        if (!(y == 0 && x == 0)) word_step_back(b, &y, &x);
+        while (!(y == 0 && x == 0) &&
+               word_class(word_stream_char(b, y, x)) == 0)
+            word_step_back(b, &y, &x);
+        /* Rewind to the first char of the word we landed in. */
+        int cl = word_class(word_stream_char(b, y, x));
+        while (cl != 0 && !(y == 0 && x == 0)) {
+            int py = y, px = x;
+            word_step_back(b, &py, &px);
+            if (word_class(word_stream_char(b, py, px)) != cl) break;
+            y = py; x = px;
+        }
+    }
+
+    if (y < 0) y = 0;
+    if (y >= b->num_rows) y = b->num_rows - 1;
+    int rowlen = b->rows[y].size;
+    if (x < 0) x = 0;
+    if (x > rowlen) x = rowlen;
+    /* Normal/visual mode never rests on the virtual one-past-the-end column. */
+    if (state->mode != MODE_INSERT && rowlen > 0 && x >= rowlen) x = rowlen - 1;
+
+    state->cy = y;
+    state->cx = x;
+    state->rx = buffer_row_cx_to_rx(&b->rows[y], x);
+}
+
+/* Vim { / }: jump to the previous (dir < 0) or next (dir > 0) empty-line
+ * paragraph boundary, leaving the cursor in column 0. */
+static void editor_move_paragraph(EditorState *state, int dir) {
+    int n = state->buffer.num_rows;
+    if (n <= 0) return;
+    int y = state->cy;
+    if (dir > 0) {
+        while (y < n && state->buffer.rows[y].size == 0) y++;
+        while (y < n && state->buffer.rows[y].size != 0) y++;
+        if (y >= n) y = n - 1;
+    } else {
+        while (y > 0 && state->buffer.rows[y].size == 0) y--;
+        while (y > 0 && state->buffer.rows[y].size != 0) y--;
+    }
+    state->cy = y;
+    state->cx = 0;
+    state->rx = 0;
+}
+
+/* Move the cursor by one full viewport height (Shift+Up/Down and the Page
+ * keys). `editor_scroll` then scrolls the window to keep the cursor visible,
+ * so the viewport follows the cursor and stays in sync. The column is kept
+ * (clamped to the row), and the cursor is clamped to the buffer. */
+static void editor_page_motion(EditorState *state, int dir) {
+    int n = state->buffer.num_rows;
+    if (n <= 0) return;
+    int page = state->screen_rows > 0 ? state->screen_rows : 1;
+    int y = state->cy + dir * page;
+    if (y < 0) y = 0;
+    if (y > n - 1) y = n - 1;
+    state->cy = y;
+    int rowlen = state->buffer.rows[y].size;
+    if (state->cx > rowlen) state->cx = rowlen;
+    state->rx = buffer_row_cx_to_rx(&state->buffer.rows[y], state->cx);
+}
+
+/* Modified navigation keys, shared by NORMAL, VISUAL and INSERT (a visual
+ * selection simply extends because the anchor is untouched). Returns 1 when
+ * `key` was one of them and it was applied:
+ *   - word  (Ctrl/Shift + Left/Right)
+ *   - paragraph (Ctrl + Up/Down)
+ *   - page  (Shift + Up/Down, PageUp/PageDown, Shift+PageUp/PageDown) */
+static int editor_handle_modified_nav(EditorState *state, int key) {
+    int word_right = (key == terminal_combo(KEY_MOD_CTRL, ARROW_RIGHT)) ||
+                     (key == terminal_combo(KEY_MOD_SHIFT, ARROW_RIGHT));
+    int word_left  = (key == terminal_combo(KEY_MOD_CTRL, ARROW_LEFT)) ||
+                     (key == terminal_combo(KEY_MOD_SHIFT, ARROW_LEFT));
+    int para_down  = (key == terminal_combo(KEY_MOD_CTRL, ARROW_DOWN));
+    int para_up    = (key == terminal_combo(KEY_MOD_CTRL, ARROW_UP));
+    int page_down  = (key == terminal_combo(KEY_MOD_SHIFT, ARROW_DOWN)) ||
+                     (key == PAGE_DOWN) ||
+                     (key == terminal_combo(KEY_MOD_SHIFT, PAGE_DOWN));
+    int page_up    = (key == terminal_combo(KEY_MOD_SHIFT, ARROW_UP)) ||
+                     (key == PAGE_UP) ||
+                     (key == terminal_combo(KEY_MOD_SHIFT, PAGE_UP));
+    if (!word_right && !word_left && !para_down && !para_up &&
+        !page_down && !page_up)
+        return 0;
+    if (state->mode != MODE_NORMAL && state->mode != MODE_VISUAL &&
+        state->mode != MODE_INSERT)
+        return 0;
+
+    /* A motion cancels a pending operator, and dismisses the completion menu
+     * so its anchor can't drift away from the cursor. */
+    if (state->mode == MODE_NORMAL) state->pending_op = 0;
+    if (state->mode == MODE_INSERT && state->completion_active)
+        editor_completion_close(state);
+
+    if (word_right) editor_move_word(state, 1);
+    else if (word_left) editor_move_word(state, -1);
+    else if (para_down) editor_move_paragraph(state, 1);
+    else if (para_up) editor_move_paragraph(state, -1);
+    else if (page_down) editor_page_motion(state, 1);
+    else editor_page_motion(state, -1);
+    return 1;
+}
+
 /* Keep the cursor on screen by adjusting the row/column offsets. Scrolling
  * only crosses the visible window edge and stops at the first/last line of
  * text (and at column 0 / the end of the longest row). */
@@ -1553,6 +1729,106 @@ static int editor_rx_to_cx(const erow *row, int rx) {
     while (cx < row->size && buffer_row_cx_to_rx(row, cx) <= rx)
         cx++;
     return cx > 0 ? cx - 1 : 0;
+}
+
+/* ---- search highlight / next-previous ------------------------------------ */
+
+/* The pattern the renderer highlights: the in-progress query while typing in
+ * SEARCH mode, else the confirmed query while the highlight is on, else "". */
+const char *editor_search_needle(const EditorState *state) {
+    if (state->mode == MODE_SEARCH) return state->search_buf;
+    if (state->search_highlight_on) return state->active_search;
+    return "";
+}
+
+/* Case-insensitive literal test of `nlen` bytes of `needle` at render column
+ * `rx` of `row`. Single source of truth: the display overlay and the
+ * next/previous motions both go through it so they can never disagree. */
+int editor_search_match_at(const erow *row, int rx, const char *needle,
+                           int nlen) {
+    if (nlen <= 0 || rx < 0 || rx + nlen > row->rsize) return 0;
+    for (int k = 0; k < nlen; k++) {
+        if (tolower((unsigned char)row->render[rx + k]) !=
+            tolower((unsigned char)needle[k]))
+            return 0;
+    }
+    return 1;
+}
+
+/* Find the next (dir > 0) / previous (dir < 0) match of `active_search` from
+ * the cursor, scanning whole rows and wrapping around the buffer. On the
+ * starting row `inclusive` allows a match at / covering the cursor column (used
+ * when confirming a search, so `/x` can land on the match under the cursor).
+ * Returns 1 and fills the row / render column on success. */
+static int search_find(EditorState *state, int dir, int inclusive,
+                       int *out_row, int *out_rx) {
+    const char *needle = state->active_search;
+    int nlen = (int)strlen(needle);
+    int nrows = state->buffer.num_rows;
+    if (nlen <= 0 || nrows <= 0) return 0;
+    for (int step = 0; step < nrows; step++) {
+        int r = state->cy + dir * step;
+        while (r < 0) r += nrows;
+        while (r >= nrows) r -= nrows;
+        const erow *row = &state->buffer.rows[r];
+        if (row->rsize < nlen) continue;
+        if (dir > 0) {
+            int from = (step == 0) ? state->rx + (inclusive ? 0 : 1) : 0;
+            if (from < 0) from = 0;
+            for (int p = from; p + nlen <= row->rsize; p++) {
+                if (editor_search_match_at(row, p, needle, nlen)) {
+                    *out_row = r;
+                    *out_rx = p;
+                    return 1;
+                }
+            }
+        } else {
+            int last = row->rsize - nlen;
+            if (step == 0) {
+                /* Keep only matches that end at / before the cursor column, so
+                 * the match the cursor is sitting in is not offered again. */
+                int cap = state->rx - (inclusive ? 0 : 1) - nlen + 1;
+                if (cap < last) last = cap;
+            }
+            for (int p = last; p >= 0; p--) {
+                if (editor_search_match_at(row, p, needle, nlen)) {
+                    *out_row = r;
+                    *out_rx = p;
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/* Park the cursor on the match at render column `rx` of buffer row `row`. */
+static void search_goto(EditorState *state, int row, int rx) {
+    int cx = editor_rx_to_cx(&state->buffer.rows[row], rx);
+    state->cy = row;
+    state->cx = cx;
+    state->rx = buffer_row_cx_to_rx(&state->buffer.rows[row], cx);
+}
+
+/* Next / previous confirmed match, wrapping around the buffer. Shared by the
+ * `:searchnext` / `:searchprev` commands and the default Alt+Right / Alt+Left
+ * keys, so a `[bindings]` map and the built-in keys mean the same thing. */
+static void editor_search_jump(EditorState *state, int dir) {
+    if (state->active_search[0] == '\0') {
+        editor_set_status_message(state, "No previous search");
+        return;
+    }
+    int row, rx;
+    if (!search_find(state, dir, 0, &row, &rx)) {
+        editor_set_status_message(state, "Pattern not found: %s",
+                                  state->active_search);
+        return;
+    }
+    int wrapped = (dir > 0) ? (row < state->cy) : (row > state->cy);
+    search_goto(state, row, rx);
+    editor_set_status_message(state, wrapped ? "Search wrapped to '%s'"
+                                             : "Search: %s",
+                              state->active_search);
 }
 
 /* Insertion index for a block insert landing at render column `col` on `row`.
@@ -1989,7 +2265,9 @@ static void editor_run_cmd(EditorState *state, const char *cmdline) {
     } else if (strcmp(cmd, "noh") == 0 ||
                strcmp(cmd, "nohighlight") == 0 ||
                strcmp(cmd, "nohlsearch") == 0) {
-        state->active_search[0] = '\0';
+        /* Stop drawing the highlight but keep the pattern, so the
+         * next/previous motions still work (Vim's `n`/`N` after `:noh`). */
+        state->search_highlight_on = 0;
         editor_set_status_message(state, "No highlights");
     } else if (strcmp(cmd, "diag") == 0 ||
                strcmp(cmd, "diags") == 0 ||
@@ -2016,9 +2294,61 @@ static void editor_run_cmd(EditorState *state, const char *cmdline) {
                strcmp(cmd, "files") == 0 ||
                strcmp(cmd, "oil") == 0) {
         explorer_open(state);
+    } else if (strcmp(cmd, "pageup") == 0 || strcmp(cmd, "pgup") == 0) {
+        editor_page_motion(state, -1);
+    } else if (strcmp(cmd, "pagedown") == 0 || strcmp(cmd, "pgdn") == 0) {
+        editor_page_motion(state, 1);
+    } else if (strcmp(cmd, "wordleft") == 0 || strcmp(cmd, "wordprev") == 0) {
+        editor_move_word(state, -1);
+    } else if (strcmp(cmd, "wordright") == 0 || strcmp(cmd, "wordnext") == 0) {
+        editor_move_word(state, 1);
+    } else if (strcmp(cmd, "parup") == 0 || strcmp(cmd, "parprev") == 0) {
+        editor_move_paragraph(state, -1);
+    } else if (strcmp(cmd, "pardown") == 0 || strcmp(cmd, "parnext") == 0) {
+        editor_move_paragraph(state, 1);
+    } else if (strcmp(cmd, "searchnext") == 0 || strcmp(cmd, "snext") == 0 ||
+               strcmp(cmd, "findnext") == 0) {
+        editor_search_jump(state, 1);
+    } else if (strcmp(cmd, "searchprev") == 0 || strcmp(cmd, "sprev") == 0 ||
+               strcmp(cmd, "findprev") == 0) {
+        editor_search_jump(state, -1);
     } else {
         editor_set_status_message(state, "Unknown command: %s", cmd);
     }
+}
+
+/* Motion commands bound with a `[bindings]` map keep the current mode, so in
+ * VISUAL they extend the selection instead of being dropped like a normal
+ * `:command` (the binding dispatcher only resets the mode for the others). */
+static int editor_cmd_is_motion(const char *cmd) {
+    return strcmp(cmd, "pageup") == 0 || strcmp(cmd, "pgup") == 0 ||
+           strcmp(cmd, "pagedown") == 0 || strcmp(cmd, "pgdn") == 0 ||
+           strcmp(cmd, "wordleft") == 0 || strcmp(cmd, "wordprev") == 0 ||
+           strcmp(cmd, "wordright") == 0 || strcmp(cmd, "wordnext") == 0 ||
+           strcmp(cmd, "parup") == 0 || strcmp(cmd, "parprev") == 0 ||
+           strcmp(cmd, "pardown") == 0 || strcmp(cmd, "parnext") == 0 ||
+           strcmp(cmd, "searchnext") == 0 || strcmp(cmd, "snext") == 0 ||
+           strcmp(cmd, "findnext") == 0 ||
+           strcmp(cmd, "searchprev") == 0 || strcmp(cmd, "sprev") == 0 ||
+           strcmp(cmd, "findprev") == 0;
+}
+
+/* Built-in keys for the search motions: Alt+Right / Alt+Left (NORMAL and
+ * VISUAL only, so in a selection they grow it). `[bindings]` maps are
+ * dispatched earlier, so a user map overrides these. */
+static int editor_handle_search_nav(EditorState *state, int key) {
+    if (state->mode != MODE_NORMAL && state->mode != MODE_VISUAL) return 0;
+    if (key == terminal_combo(KEY_MOD_ALT, ARROW_RIGHT)) {
+        state->pending_op = 0;
+        editor_run_cmd(state, "searchnext");
+        return 1;
+    }
+    if (key == terminal_combo(KEY_MOD_ALT, ARROW_LEFT)) {
+        state->pending_op = 0;
+        editor_run_cmd(state, "searchprev");
+        return 1;
+    }
+    return 0;
 }
 
 /* Shift+V may arrive as the plain 'V' byte or, under the kitty keyboard
@@ -2027,23 +2357,48 @@ static int is_shift_v(int c) {
     return c == 'V' || c == terminal_combo(KEY_MOD_SHIFT, 'v');
 }
 
+/* An Alt-modified arrow/page/home/end/del that no binding claimed keeps its
+ * pre-existing meaning (Alt+arrow moved one cell, Alt+PageUp/Down paged) by
+ * dropping the modifier. Returns the plain key, or -1 when the key is not such
+ * a combo. Super stays untouched (it drives the clipboard shortcuts). */
+static int editor_alt_nav_fallback(int c) {
+    static const int keys[] = {
+        ARROW_UP, ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT,
+        PAGE_UP, PAGE_DOWN, HOME_KEY, END_KEY, DEL_KEY,
+    };
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+        if (c == terminal_combo(KEY_MOD_ALT, keys[i])) return keys[i];
+    return -1;
+}
+
 void editor_process_keypress(EditorState *state) {
     int c = terminal_read_key();
 
     /* User key maps from the `[bindings]` config section. They are consulted
      * first (so e.g. `map <D-y> :q!` can rebind a clipboard shortcut) and only
      * in the editing key-modes: typing (INSERT, SEARCH) and `:`-typed commands
-     * are never intercepted. A binding is a command, so VISUAL is dropped. */
+     * are never intercepted. A binding is a command, so VISUAL is dropped —
+     * except for the motion commands (see editor_cmd_is_motion), which keep the
+     * mode so a bound key extends a visual selection. */
     if (state->mode == MODE_NORMAL || state->mode == MODE_VISUAL) {
         for (int i = 0; i < state->binding_count; i++) {
             if (c == state->bindings[i].key) {
                 state->pending_op = 0;
-                state->mode = MODE_NORMAL;
+                if (!editor_cmd_is_motion(state->bindings[i].cmd))
+                    state->mode = MODE_NORMAL;
                 editor_run_cmd(state, state->bindings[i].cmd);
                 editor_scroll(state);
                 return;
             }
         }
+    }
+
+    /* Default search-motion keys (Alt+Right / Alt+Left), after the bindings so
+     * a user map wins, and before the Alt fallback that would otherwise turn
+     * them into a single-cell move. */
+    if (editor_handle_search_nav(state, c)) {
+        editor_scroll(state);
+        return;
     }
 
     /* Clipboard shortcuts (default Super+y / Super+p). They use modifier-encoded
@@ -2063,6 +2418,20 @@ void editor_process_keypress(EditorState *state) {
             editor_scroll(state);
             return;
         }
+    }
+
+    /* An unclaimed Alt+arrow/page keeps its legacy one-cell / plain meaning. */
+    {
+        int fb = editor_alt_nav_fallback(c);
+        if (fb >= 0) c = fb;
+    }
+
+    /* Modified navigation (Ctrl/Shift+arrow words, paragraphs, pages), before
+     * the per-mode switch so all of NORMAL, VISUAL and INSERT get exactly the
+     * same behavior. */
+    if (editor_handle_modified_nav(state, c)) {
+        editor_scroll(state);
+        return;
     }
 
     switch (state->mode) {
@@ -2449,14 +2818,26 @@ void editor_process_keypress(EditorState *state) {
                 state->search_buf[0] = '\0';
                 editor_set_status_message(state, "");
             } else if (c == KEY_ENTER) {
-                /* Confirm: keep the search highlighted until `:noh`. */
+                /* Confirm: keep the search highlighted until `:noh`, and jump
+                 * to the first match at/after the cursor (wrapping). The
+                 * pattern survives `:noh` so the motions keep working. */
                 snprintf(state->active_search, sizeof(state->active_search),
                          "%s", state->search_buf);
+                state->search_highlight_on = state->active_search[0] != '\0';
                 state->mode = MODE_NORMAL;
-                if (state->active_search[0])
-                    editor_set_status_message(state, "Search: %s", state->active_search);
-                else
+                if (state->active_search[0]) {
+                    int row, rx;
+                    if (search_find(state, 1, 1, &row, &rx)) {
+                        search_goto(state, row, rx);
+                        editor_set_status_message(state, "Search: %s",
+                                                  state->active_search);
+                    } else {
+                        editor_set_status_message(state, "Pattern not found: %s",
+                                                  state->active_search);
+                    }
+                } else {
                     editor_set_status_message(state, "");
+                }
             } else if (c == BACKSPACE) {
                 if (state->search_len > 0)
                     state->search_buf[--state->search_len] = '\0';

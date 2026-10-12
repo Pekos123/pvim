@@ -94,6 +94,10 @@ typedef struct EditorState {
     char search_buf[128];
     int search_len;
     char active_search[128];
+    /* Non-zero while the confirmed search is drawn as a highlight. `:noh`
+     * clears this but keeps `active_search`, so the next/previous motions still
+     * work afterwards (like Vim's `n`/`N` after `:noh`). */
+    int search_highlight_on;
     /* Encoded key values for the clipboard shortcuts, built from the
      * `clipboard_mod` config key (modifier + `y` to copy, + `p` to paste). */
     int clipboard_copy_key;
@@ -189,5 +193,13 @@ void editor_load_file(EditorState *state, const char *path);
  * `screen_cols` minus this value. */
 int editor_gutter_width(const EditorState *state);
 int editor_diag_lines_in_range(const EditorState *state, int lo, int hi);
+
+/* Search highlight / navigation. `editor_search_needle` is the pattern the
+ * renderer highlights (the in-progress one in SEARCH mode, else the confirmed
+ * one when the highlight is on, else ""). `editor_search_match_at` is the
+ * shared case-insensitive literal test over `row->render`, used by both the
+ * renderer and the next/previous navigation so they can never disagree. */
+const char *editor_search_needle(const EditorState *state);
+int editor_search_match_at(const erow *row, int rx, const char *needle, int nlen);
 
 #endif /* PVIM_EDITOR_H */

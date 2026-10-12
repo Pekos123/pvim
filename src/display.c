@@ -206,22 +206,13 @@ static void display_search_overlay(EditorState *state, const erow *row,
     if (end <= start) return;
     int n = end - start;
     memset(out, 0, (size_t)n);
-    const char *needle = (state->mode == MODE_SEARCH)
-        ? state->search_buf : state->active_search;
+    const char *needle = editor_search_needle(state);
     int nlen = (int)strlen(needle);
     if (nlen == 0) return;
     int scan = start - nlen + 1;
     if (scan < 0) scan = 0;
     for (int p = scan; p + nlen <= end && p + nlen <= row->rsize; p++) {
-        int eq = 1;
-        for (int k = 0; k < nlen; k++) {
-            if (tolower((unsigned char)row->render[p + k]) !=
-                tolower((unsigned char)needle[k])) {
-                eq = 0;
-                break;
-            }
-        }
-        if (eq) {
+        if (editor_search_match_at(row, p, needle, nlen)) {
             for (int k = p; k < p + nlen; k++)
                 if (k >= start) out[k - start] = 1;
         }
@@ -515,7 +506,8 @@ void display_refresh_screen(EditorState *state) {
     ab_printf(&ab, " | Ln: %s",
               state->line_numbers == LN_RELATIVE ? "rel" :
               state->line_numbers == LN_OFF     ? "off" : "abs");
-    if (state->mode != MODE_SEARCH && state->active_search[0] != '\0') {
+    if (state->mode != MODE_SEARCH && state->search_highlight_on &&
+        state->active_search[0] != '\0') {
         ab_puts(&ab, " | /");
         ab_puts_c(&ab, state->active_search);
     }
