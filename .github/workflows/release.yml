@@ -1,7 +1,7 @@
 name: Release
 
-# Build a standalone Linux binary and publish it whenever a version tag is
-# pushed, e.g.:
+# Build standalone Linux and macOS binaries and publish them whenever a version
+# tag is pushed, e.g.:
 #   git tag v0.2.0 && git push origin v0.2.0
 on:
   push:
@@ -13,35 +13,74 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build and publish
-    runs-on: ubuntu-latest
+  build:
+    name: Build (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: pvim-linux-x86_64
+          - os: macos-latest
+            asset: pvim-macos-universal
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       # ubuntu-latest ships clang, but fall back to apt if it ever doesn't.
-      - name: Ensure clang
+      - name: Ensure clang (Linux)
+        if: runner.os == 'Linux'
         run: command -v clang || (sudo apt-get update && sudo apt-get install -y --no-install-recommends clang)
 
-      # `make` compiles every object with the strict C99 flags; linking with
-      # -static makes the result self-contained (only needs a Linux kernel).
-      - name: Build standalone binary
+      # `make` compiles every object with the strict C99 flags; a failure here
+      # fails the job before anything is packaged.
+      - name: Compile check
+        run: make
+
+      # Linux: -static makes the result self-contained (only needs a kernel).
+      - name: Build Linux binary
+        if: runner.os == 'Linux'
         run: |
-          make
-          clang -static src/*.o -o pvim-linux-x86_64
-          chmod +x pvim-linux-x86_64
-          file pvim-linux-x86_64
+          clang -static src/*.o -o "${{ matrix.asset }}"
+          chmod +x "${{ matrix.asset }}"
+          file "${{ matrix.asset }}"
+
+      # macOS: compile every source for both architectures so the linker emits a
+      # genuine universal (fat) Mach-O. Linking a single set of host-arch .o
+      # files with `-arch x86_64 -arch arm64` does NOT work -- it fails or
+      # produces one slice -- so the sources are recompiled per-arch here.
+      - name: Build macOS universal binary
+        if: runner.os == 'macOS'
+        run: |
+          clang -arch x86_64 -arch arm64 -Wall -Wextra -Wpedantic -std=c99 \
+            src/*.c -o "${{ matrix.asset }}"
+          chmod +x "${{ matrix.asset }}"
+          echo "arches: $(lipo -archs "${{ matrix.asset }}")"
+          file "${{ matrix.asset }}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pvim-linux-x86_64
-          path: pvim-linux-x86_64
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  # A single publisher collects every build artifact and creates one release, so
+  # the Linux and macOS jobs can't race each other on the GitHub release.
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: pvim-linux-x86_64
+          files: dist/*
           fail_on_unmatched_files: true
           generate_release_notes: true
