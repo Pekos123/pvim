@@ -32,10 +32,22 @@ fail() { printf 'pvim: %s\n' "$*" >&2; exit 1; }
 # --- platform check ---------------------------------------------------------
 os=$(uname -s 2>/dev/null || echo unknown)
 arch=$(uname -m 2>/dev/null || echo unknown)
-[ "$os" = "Linux" ] || fail "this installer supports Linux only (found: $os)."
-case "$arch" in
-    x86_64|amd64) : ;;
-    *) fail "no prebuilt binary for '$arch'; only 64-bit x86_64 is published." ;;
+
+case "$os" in
+    Linux)
+        ASSET="pvim-linux-x86_64"
+        case "$arch" in
+            x86_64|amd64) : ;;
+            *) fail "no prebuilt binary for '$arch'; only 64-bit x86_64 is published." ;;
+        esac
+        ;;
+    Darwin)
+        ASSET="pvim-macos-universal"
+        # macOS binaries are universal; architecture check not strictly needed for the binary format
+        ;;
+    *)
+        fail "this installer supports Linux and macOS only (found: $os)."
+        ;;
 esac
 
 # --- downloader -------------------------------------------------------------
@@ -57,11 +69,11 @@ download "$URL" "$tmp" || fail "download failed: $URL"
 chmod 755 "$tmp"
 
 # A 404 or captive portal can yield a valid file that is not a binary; make
-# sure we got a real 64-bit ELF before touching the system.
+# sure we got a real executable binary before touching the system.
 if command -v file >/dev/null 2>&1; then
     case "$(file -b "$tmp")" in
-        *ELF*64-bit*) : ;;
-        *) fail "downloaded file is not a 64-bit ELF binary." ;;
+        *ELF*64-bit*|*Mach-O*) : ;;
+        *) fail "downloaded file is not a valid 64-bit ELF or Mach-O binary." ;;
     esac
 fi
 
