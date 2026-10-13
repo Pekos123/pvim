@@ -1,4 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+    #define _DARWIN_C_SOURCE 1
+    #include <sys/ttycom.h>
+#endif
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -177,6 +181,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    /* Cleanup after exiting pvim */
     lsp_stop(&lsp);
     terminal_leave_alternate_screen();
     terminal_disable_raw_mode();

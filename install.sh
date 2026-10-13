@@ -1,9 +1,9 @@
 #!/bin/sh
 # pvim one-line installer.
 #
-# Downloads the latest prebuilt release binary (pvim-linux-x86_64) and installs
-# it as /usr/local/bin/pvim so `pvim` runs from any directory. Pure POSIX sh;
-# needs only curl or wget.
+# Downloads the latest prebuilt release binary (pvim-linux-x86_64 on Linux,
+# pvim-macos-universal on macOS) and installs it as /usr/local/bin/pvim so
+# `pvim` runs from any directory. Pure POSIX sh; needs only curl or wget.
 #
 # Overridable environment variables:
 #   PVIM_REPO     GitHub "owner/repo"       [Pekos123/pvim]
@@ -14,17 +14,7 @@ set -eu
 
 REPO="${PVIM_REPO:-Pekos123/pvim}"
 BINDIR="${PVIM_BINDIR:-/usr/local/bin}"
-ASSET="pvim-linux-x86_64"
 NAME="pvim"
-
-URL="${PVIM_URL:-}"
-if [ -z "$URL" ]; then
-    if [ -n "${PVIM_VERSION:-}" ]; then
-        URL="https://github.com/${REPO}/releases/download/${PVIM_VERSION}/${ASSET}"
-    else
-        URL="https://github.com/${REPO}/releases/latest/download/${ASSET}"
-    fi
-fi
 
 say()  { printf '%s\n' "$*"; }
 fail() { printf 'pvim: %s\n' "$*" >&2; exit 1; }
@@ -33,9 +23,12 @@ fail() { printf 'pvim: %s\n' "$*" >&2; exit 1; }
 os=$(uname -s 2>/dev/null || echo unknown)
 arch=$(uname -m 2>/dev/null || echo unknown)
 
+# `expect` is the substring `file` must report for the downloaded binary, so a
+# Linux ELF can never be installed on macOS (or vice versa).
 case "$os" in
     Linux)
         ASSET="pvim-linux-x86_64"
+        expect="ELF 64-bit"
         case "$arch" in
             x86_64|amd64) : ;;
             *) fail "no prebuilt binary for '$arch'; only 64-bit x86_64 is published." ;;
@@ -43,12 +36,24 @@ case "$os" in
         ;;
     Darwin)
         ASSET="pvim-macos-universal"
-        # macOS binaries are universal; architecture check not strictly needed for the binary format
+        expect="Mach-O"
+        # macOS binaries are universal (x86_64 + arm64); no arch check needed.
         ;;
     *)
         fail "this installer supports Linux and macOS only (found: $os)."
         ;;
 esac
+
+# Derive the download URL from the *chosen* asset after detection, so a Mac
+# never fetches the Linux binary (or vice versa).
+URL="${PVIM_URL:-}"
+if [ -z "$URL" ]; then
+    if [ -n "${PVIM_VERSION:-}" ]; then
+        URL="https://github.com/${REPO}/releases/download/${PVIM_VERSION}/${ASSET}"
+    else
+        URL="https://github.com/${REPO}/releases/latest/download/${ASSET}"
+    fi
+fi
 
 # --- downloader -------------------------------------------------------------
 if command -v curl >/dev/null 2>&1; then
@@ -69,11 +74,13 @@ download "$URL" "$tmp" || fail "download failed: $URL"
 chmod 755 "$tmp"
 
 # A 404 or captive portal can yield a valid file that is not a binary; make
-# sure we got a real executable binary before touching the system.
+# sure we got a real executable in the format this platform expects before
+# touching the system.
 if command -v file >/dev/null 2>&1; then
-    case "$(file -b "$tmp")" in
-        *ELF*64-bit*|*Mach-O*) : ;;
-        *) fail "downloaded file is not a valid 64-bit ELF or Mach-O binary." ;;
+    got="$(file -b "$tmp")"
+    case "$got" in
+        *"$expect"*) : ;;
+        *) fail "downloaded file is not a $expect binary (got: $got); refusing to install." ;;
     esac
 fi
 

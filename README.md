@@ -5,27 +5,41 @@ scrolling, and a syntax highlighter whose rules and colours are **fully
 external**: the C code contains no keyword lists, no extension tables, and no
 hardcoded colours — everything comes from config files.
 
-## Quick Install (Linux)
+## Quick Install (Linux & macOS)
 
-Install the latest prebuilt binary in one line. It downloads
-`pvim-linux-x86_64` from the GitHub Releases page, makes it executable, and
-installs it to `/usr/local/bin/pvim` (using `sudo` only when that directory is
-not writable):
+Install the latest prebuilt binary in one line — it detects the OS and
+downloads the matching asset (`pvim-linux-x86_64` on Linux,
+`pvim-macos-universal` on macOS), makes it executable, and installs it to
+`/usr/local/bin/pvim` (using `sudo` only when that directory is not writable):
 
 ```sh
 curl -sSL https://raw.githubusercontent.com/Pekos123/pvim/main/install.sh | bash
 ```
 
-Prefer not to pipe a script into your shell? Fetch the binary yourself and put
-it on your `PATH`:
+Prefer a self-contained script? Clone the repo and run `./install.sh` (or
+`curl ... | bash` with the file next to you) — same result, no build step on
+either platform:
 
 ```sh
-curl -sL https://github.com/Pekos123/pvim/releases/latest/download/pvim-linux-x86_64 -o pvim && chmod +x pvim && sudo mv pvim /usr/local/bin/
+git clone https://github.com/Pekos123/pvim
+cd pvim
+./install.sh
 ```
 
-Either way `pvim` is then available from any directory. The release binary is a
-standalone 64-bit x86_64 Linux executable with no runtime dependencies; to
-build from source or run on another platform, see [Build & run](#build--run).
+Prefer not to run a script at all? Fetch the binary yourself and put it on your
+`PATH`:
+
+```sh
+# Linux:
+curl -sL https://github.com/Pekos123/pvim/releases/latest/download/pvim-linux-x86_64 -o pvim && chmod +x pvim && sudo mv pvim /usr/local/bin/
+# macOS:
+curl -sL https://github.com/Pekos123/pvim/releases/latest/download/pvim-macos-universal -o pvim && chmod +x pvim && sudo mv pvim /usr/local/bin/
+```
+
+Either way `pvim` is then available from any directory. The Linux release
+binary is a standalone 64-bit x86_64 ELF with no runtime dependencies; the
+macOS one is a universal Mach-O that runs natively on both Intel and Apple
+Silicon. To build from source instead, see [Build & run](#build--run).
 
 ## Build & run
 
